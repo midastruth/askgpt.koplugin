@@ -117,10 +117,32 @@ local function showChatGPTDialog(ui, highlightedText, message_history)
 
           local result_text = createResultText(highlightedText, message_history)
 
+          -- 定义 handleAddToNote，现在它可以从外部作用域捕获 'highlight'
+          local function handleAddToNote()
+            -- 添加安全检查
+            if ui.highlight and ui.highlight.addNote then
+              ui.highlight:addNote(result_text)
+              UIManager:close(chatgpt_viewer) -- 这部分没问题
+              -- 检查 onClose 方法是否存在
+              if ui.highlight.onClose then
+                ui.highlight:onClose()
+              else
+                 -- 如果 highlight 对象本身没有 onClose，可能需要调用 ui 上的方法
+                 -- 或者通过 UIManager 处理，具体看 API
+                 -- 例如 ui:closeHighlightMenu() 之类的（依赖于API）
+                 print("Warning: highlight object does not have onClose method.") -- 可以加个提示
+              end
+            else
+              -- 如果获取不到 highlight 对象，给用户提示
+              UIManager:show(InfoMessage:new{ text = _("错误：无法找到高亮对象。")})
+            end
+          end
           local chatgpt_viewer = ChatGPTViewer:new {
+            ui = ui,
             title = _("AskGPT"),
             text = result_text,
-            onAskQuestion = handleNewQuestion
+            onAskQuestion = handleNewQuestion,
+            onAddToNote = handleAddToNote, -- 设置添加到笔记的函数
           }
 
           UIManager:show(chatgpt_viewer)
@@ -150,6 +172,7 @@ local function showChatGPTDialog(ui, highlightedText, message_history)
 
           local result_text = createResultText(highlightedText, message_history)
           local chatgpt_viewer = ChatGPTViewer:new {
+            ui = ui,
             title = _("Translation"),
             text = result_text,
             onAskQuestion = handleNewQuestion

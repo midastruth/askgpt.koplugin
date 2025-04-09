@@ -34,6 +34,7 @@ local _ = require("gettext")
 local Screen = Device.screen
 
 local ChatGPTViewer = InputContainer:extend {
+  ui = nil, --添加了ui
   title = nil,
   text = nil,
   width = nil,
@@ -66,6 +67,7 @@ local ChatGPTViewer = InputContainer:extend {
   find_centered_lines_count = 5, -- line with find results to be not far from the center
 
   onAskQuestion = nil,
+  onAddToNote = nil, --添加addtonote
 }
 
 function ChatGPTViewer:init()
@@ -214,9 +216,10 @@ function ChatGPTViewer:init()
       allow_hold_when_disabled = true,
     },
     {
-      text = _("Close"),
+      text = _("Add note"),
+      id = "add_note",
       callback = function()
-        self:onClose()
+        self:addToNote()
       end,
       hold_callback = self.default_hold_callback,
     },
@@ -300,6 +303,10 @@ function ChatGPTViewer:init()
   }
 end
 
+function ChatGPTViewer:addToNote()
+  self:onAddToNote()
+end
+
 function ChatGPTViewer:askAnotherQuestion()
   local input_dialog
   input_dialog = InputDialog:new {
@@ -363,6 +370,7 @@ end
 
 function ChatGPTViewer:onClose()
   UIManager:close(self)
+  self.ui.highlight:onClose()
   if self.close_callback then
     self.close_callback()
   end
@@ -464,6 +472,7 @@ function ChatGPTViewer:update(new_text)
     height = self.height,
     buttons_table = self.buttons_table,
     onAskQuestion = self.onAskQuestion,
+    onAddToNote = self.onAddToNote,
   }
   updated_viewer.scroll_text_w:scrollToBottom()
   UIManager:show(updated_viewer)
