@@ -74,7 +74,7 @@ function AskGPT:init()
           
           -- 安全地调用对话框函数
           local success, error_msg = pcall(function()
-            showChatGPTDialog(self.ui, _reader_highlight_instance.selected_text.text)
+            showChatGPTDialog(self.ui, _reader_highlight_instance)
           end)
           
           if not success then

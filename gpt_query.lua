@@ -218,6 +218,7 @@ local function perform_json_post(endpoint, payload, context_label)
     url     = endpoint,
     method  = "POST",
     headers = {
+      ["Accept"]         = "application/json",
       ["Content-Type"]   = "application/json",
       ["Content-Length"] = tostring(#body),
     },

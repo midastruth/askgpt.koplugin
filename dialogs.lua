@@ -20,6 +20,78 @@ local function trim(text)
   return (text or ""):match("^%s*(.-)%s*$")
 end
 
+local function extract_highlight_data(source)
+  local highlighted_text = ""
+  local context_text = nil
+
+  local function extract_string(value)
+    if type(value) == "string" then
+      return value
+    elseif type(value) == "table" then
+      if type(value.text) == "string" then
+        return value.text
+      end
+      local before = type(value.before) == "string" and value.before or nil
+      local selection = type(value.selection) == "string" and value.selection or nil
+      local after = type(value.after) == "string" and value.after or nil
+      if before or selection or after then
+        local parts = {}
+        if before and before ~= "" then
+          table.insert(parts, before)
+        end
+        if selection and selection ~= "" then
+          table.insert(parts, selection)
+        end
+        if after and after ~= "" then
+          table.insert(parts, after)
+        end
+        if #parts > 0 then
+          return table.concat(parts, " ")
+        end
+      end
+      for _, item in ipairs(value) do
+        if type(item) == "string" and item ~= "" then
+          return item
+        end
+      end
+    end
+    return nil
+  end
+
+  if type(source) == "table" then
+    local selected = source.selected_text or source
+    if type(selected) == "table" then
+      highlighted_text = selected.text or highlighted_text
+      local candidates = {
+        selected.context,
+        selected.paragraph,
+        selected.sentence,
+        selected.snippet,
+        selected.selection_context,
+        selected.text_block,
+        selected.full_text,
+        selected.extended_text,
+      }
+      for _, candidate in ipairs(candidates) do
+        local candidate_text = extract_string(candidate)
+        if candidate_text and candidate_text ~= "" then
+          context_text = candidate_text
+          break
+        end
+      end
+    end
+  elseif type(source) == "string" then
+    highlighted_text = source
+  end
+
+  highlighted_text = trim(highlighted_text)
+  if not context_text or context_text == "" then
+    context_text = highlighted_text
+  end
+
+  return highlighted_text, trim(context_text)
+end
+
 local function buildLookupContext(ui, highlighted_text, extra_context)
   local props = ui.document and ui.document:getProps() or {}
   local title = props.title or _("Unknown Title")
@@ -239,7 +311,9 @@ local function performSummarize(request_opts)
   return response
 end
 
-local function showChatGPTDialog(ui, highlightedText)
+local function showChatGPTDialog(ui, highlight_source)
+  local highlightedText, highlightedContext = extract_highlight_data(highlight_source)
+
   local props = ui.document and ui.document:getProps() or {}
   local title = props.title or _("Unknown Title")
   local author = props.authors or _("Unknown Author")
@@ -254,10 +328,24 @@ local function showChatGPTDialog(ui, highlightedText)
       end
 
       local question = trim(options.question)
-      local context = buildLookupContext(ui, options.highlighted_text or highlightedText, question)
-      if options.context and options.context ~= "" then
-        context = context .. "\n" .. options.context
+      local base_context = ""
+      if type(options.context) == "string" then
+        base_context = trim(options.context)
       end
+      local skip_context_question = options.skip_context_question
+
+      local function compose_context(prompt_text)
+        local trimmed_prompt = trim(prompt_text)
+        if base_context ~= "" then
+          if trimmed_prompt ~= "" and not skip_context_question then
+            return base_context .. "\n" .. trimmed_prompt
+          end
+          return base_context
+        end
+        return buildLookupContext(ui, options.highlighted_text or highlightedText, trimmed_prompt)
+      end
+
+      local request_context = compose_context(question)
 
       local request_term = trim(options.term)
       if request_term == "" then
@@ -265,10 +353,11 @@ local function showChatGPTDialog(ui, highlightedText)
         return
       end
 
+      local request_language = options.request_language or options.language
       local dictionary = performLookup {
         term = request_term,
-        language = options.language,
-        context = context,
+        language = request_language,
+        context = request_context,
       }
       if not dictionary then
         return
@@ -307,10 +396,12 @@ local function showChatGPTDialog(ui, highlightedText)
           return
         end
 
-        local follow_context = buildLookupContext(ui, highlightedText, follow_term)
+        local follow_context = compose_context(follow_term)
+        local follow_language = options.followup_language or options.language
+        local follow_request_language = options.followup_request_language or options.request_language or follow_language
         local dictionary_follow = performLookup {
           term = follow_term,
-          language = options.followup_language or options.language,
+          language = follow_request_language,
           context = follow_context,
         }
         if not dictionary_follow then
@@ -321,7 +412,7 @@ local function showChatGPTDialog(ui, highlightedText)
           question = follow_term,
           term = follow_term,
           dictionary = dictionary_follow,
-          language = options.followup_language or options.language,
+          language = follow_language,
           title = title,
           author = author,
         }
@@ -485,8 +576,12 @@ local function showChatGPTDialog(ui, highlightedText)
           highlighted_text = highlightedText,
           question = _("Translate to ") .. target_language,
           language = target_language,
+          request_language = "auto",
           viewer_title = _("Translation"),
           followup_language = target_language,
+          followup_request_language = "auto",
+          context = highlightedContext,
+          skip_context_question = true,
         }
       end,
     })
