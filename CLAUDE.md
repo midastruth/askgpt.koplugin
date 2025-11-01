@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **AskGPT** plugin for KOReader, an e-reader application. The plugin enables users to highlight text and ask AI questions about it, get summaries, and perform translations. It integrates with OpenAI-compatible APIs and custom Reader AI backends.
+This is the **AskGPT** plugin for KOReader, an e-reader application. The plugin enables users to highlight text and query AI for answers about selected content. It supports dictionary lookups, summaries, translations, and custom questions. The plugin has evolved from OpenAI ChatGPT integration to primarily use custom Reader AI FastAPI backends with enhanced Chinese language support.
 
 ## Architecture
 
@@ -46,16 +46,30 @@ cp configuration.lua.example configuration.lua
 # Edit configuration.lua with your API endpoints and keys
 ```
 
+Current configuration uses Reader AI backend by default with Chinese language support. The configuration follows this pattern:
+```lua
+local CONFIGURATION = {
+    reader_ai_base_url = "http://your-server:8000",
+    reader_ai_dictionary_path = "/ai/dictionary",
+    reader_ai_summarize_path = "/ai/summarize",
+    features = {
+        translate_to = "Chinese",
+        askQuestions = true,
+        aiDictionary = true,
+    }
+}
+```
+
 ## Key Configuration Options
 
 The plugin supports multiple AI backends through `configuration.lua`:
 
-- **OpenAI API** - Standard ChatGPT API integration
-- **Reader AI FastAPI** - Custom backend with dictionary and summarize endpoints
+- **Reader AI FastAPI** - Primary backend with dictionary and summarize endpoints (default configuration)
+- **OpenAI API** - Standard ChatGPT API integration (legacy support)
 - **Local APIs** - Ollama or other local LLM services
-- **Translation** - Configurable target language via `features.translate_to`
+- **Translation** - Configurable target language via `features.translate_to` (defaults to Chinese)
 
-Network robustness features include automatic retry (3 attempts), 1000s timeout, and graceful error handling.
+Network robustness features include automatic retry (3 attempts), 1000s timeout (increased from 10s for slow API responses), and graceful error handling.
 
 ## File Structure & Responsibilities
 
