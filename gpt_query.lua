@@ -24,7 +24,7 @@ local DEFAULT_READER_AI_DICTIONARY_PATH = "/ai/dictionary"
 local DEFAULT_READER_AI_SUMMARIZE_PATH = "/ai/summarize"
 
 -- 网络请求配置
-local REQUEST_TIMEOUT = 10  -- 请求超时时间（秒）
+local REQUEST_TIMEOUT = 1000  -- 请求超时时间（秒）
 local MAX_RETRY_ATTEMPTS = 3  -- 最大重试次数
 local RETRY_DELAY = 2  -- 重试间隔（秒）
 
