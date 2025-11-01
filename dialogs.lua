@@ -430,6 +430,99 @@ local function formatSummaryBlock(args)
 end
 
 --[[--
+格式化文本分析结果为用户可读的显示块
+将AI返回的分析数据转换为结构化的显示格式
+
+包含的信息：
+- 原始文本内容
+- 用户的分析重点
+- AI生成的分析结果
+- 详细信息（关键词、情感分析、主题等）
+- 文档来源信息
+
+@param args table 格式化参数，包含以下字段：
+  - highlighted_text: 原始高亮文本
+  - focus_points: 用户的分析重点
+  - analysis: AI返回的分析结果
+  - language: 语言信息
+  - title, author: 文档信息
+@return string 格式化的显示文本
+]]
+local function formatAnalysisBlock(args)
+  local segments = {}
+  local analysis = args.analysis or {}
+
+  -- 添加原始文本信息
+  if args.highlighted_text and args.highlighted_text ~= "" then
+    table.insert(segments, _("Original text: ") .. "\"" .. args.highlighted_text .. "\"")
+  end
+
+  -- 添加用户的分析重点
+  if args.focus_points and type(args.focus_points) == "table" and #args.focus_points > 0 then
+    local focus_text = _("Focus points: ") .. table.concat(args.focus_points, ", ")
+    table.insert(segments, focus_text)
+  end
+
+  -- 添加AI生成的主要分析结果
+  if analysis.analysis and analysis.analysis ~= "" then
+    table.insert(segments, _("Analysis: ") .. analysis.analysis)
+  end
+
+  -- 处理AI返回的详细信息
+  if type(analysis) == "table" then
+    -- 格式化关键词
+    if analysis.keywords or analysis.key_words then
+      local keywords = analysis.keywords or analysis.key_words
+      if type(keywords) == "table" and #keywords > 0 then
+        local keywords_text = _("Keywords: ") .. table.concat(keywords, ", ")
+        table.insert(segments, keywords_text)
+      end
+    end
+
+    -- 格式化主题
+    if analysis.themes or analysis.topics then
+      local themes = analysis.themes or analysis.topics
+      local themes_formatted = format_list(_("Themes"), themes)
+      if themes_formatted then
+        table.insert(segments, themes_formatted)
+      end
+    end
+
+    -- 格式化情感分析
+    if analysis.sentiment then
+      table.insert(segments, _("Sentiment: ") .. analysis.sentiment)
+    end
+
+    -- 格式化重要观点
+    local key_points = format_list(_("Key points"), analysis.key_points or analysis.main_points)
+    if key_points then
+      table.insert(segments, key_points)
+    end
+
+    -- 添加分析摘要
+    if analysis.summary and analysis.summary ~= "" then
+      table.insert(segments, _("Summary: ") .. analysis.summary)
+    end
+  end
+
+  -- 添加文档来源信息
+  if args.title or args.author then
+    local document_info = _("Document: ") .. (args.title or _("Unknown Title"))
+    if args.author and args.author ~= "" then
+      document_info = document_info .. _(" by ") .. args.author
+    end
+    table.insert(segments, document_info)
+  end
+
+  -- 处理空结果的情况
+  if #segments == 0 then
+    return _("No analysis available.")
+  end
+
+  return table.concat(segments, "\n\n")
+end
+
+--[[--
 显示加载提示对话框
 在AI请求处理期间向用户显示加载状态，提升用户体验
 
@@ -526,6 +619,45 @@ local function performSummarize(request_opts)
   -- 验证响应数据格式和必要字段
   if type(response) ~= "table" or type(response.summary) ~= "string" then
     showError(_("摘要返回格式无效。"))
+    return nil
+  end
+
+  return response
+end
+
+--[[--
+执行文本分析并处理错误
+封装对ReaderAI.analyzeContent的调用，提供统一的错误处理和响应验证
+
+错误类型处理：
+- timeout: 网络超时错误
+- connection: 连接失败错误
+- attempts: 重试次数耗尽
+- 其他: 通用错误信息
+
+@param request_opts table 分析请求参数
+@return table|nil 分析结果，失败时返回nil
+]]
+local function performAnalyze(request_opts)
+  local ok, response = pcall(ReaderAI.analyzeContent, request_opts)
+  if not ok then
+    local error_msg = tostring(response)
+    -- 根据错误类型显示相应的用户友好消息
+    if error_msg:match("timeout") then
+      showError(_("网络请求超时，请检查网络连接后重试。"))
+    elseif error_msg:match("connection") or error_msg:match("Failed to contact") then
+      showError(_("无法连接到AI服务，请检查网络设置。"))
+    elseif error_msg:match("attempts") then
+      showError(_("网络连接失败，已重试" .. MAX_RETRY_ATTEMPTS .. "次。请检查网络后重试。"))
+    else
+      showError(_("文本分析失败：") .. error_msg)
+    end
+    return nil
+  end
+
+  -- 验证响应数据格式
+  if type(response) ~= "table" then
+    showError(_("分析返回格式无效。"))
     return nil
   end
 
@@ -837,6 +969,156 @@ local function showChatGPTDialog(ui, highlight_source)
   end
 
   --[[--
+  内部函数：启动文本分析工作流
+  处理文本分析的完整流程，包括内容验证、AI调用和结果显示
+
+  @param options table 分析选项，包含content、focus_points、language等参数
+  ]]
+  local function startAnalyze(options)
+    local blocks = {}      -- 存储多个分析结果块
+    local current_text = "" -- 当前显示的完整文本
+
+    -- 显示加载状态
+    local loading = showLoadingDialog()
+    UIManager:scheduleIn(0.1, function()
+      -- 关闭加载对话框
+      if loading then
+        UIManager:close(loading)
+      end
+
+      -- 处理分析重点和内容
+      local focus_points_input = trim(options.focus_points_input or "")
+      local focus_points = nil
+      if focus_points_input ~= "" then
+        -- 将用户输入的分析重点转换为数组
+        focus_points = {}
+        for point in focus_points_input:gmatch("[^,]+") do
+          local trimmed_point = trim(point)
+          if trimmed_point ~= "" then
+            table.insert(focus_points, trimmed_point)
+          end
+        end
+        if #focus_points == 0 then
+          focus_points = nil
+        end
+      end
+
+      local base_content = options.content or options.highlighted_text or highlightedText
+      local content = trim(base_content)
+
+      -- 验证内容不为空
+      if content == "" then
+        showError(_("内容不能为空。"))
+        return
+      end
+
+      -- 执行文本分析
+      local analysis_result = performAnalyze {
+        content = content,
+        focus_points = focus_points,
+        language = options.language,
+      }
+      if not analysis_result then
+        return -- performAnalyze已经显示了错误信息
+      end
+
+      -- 格式化分析结果
+      local block = formatAnalysisBlock {
+        highlighted_text = options.highlighted_text or content,
+        focus_points = focus_points,
+        analysis = analysis_result,
+        language = options.language,
+        title = title,
+        author = author,
+      }
+      table.insert(blocks, block)
+      current_text = table.concat(blocks, "\n\n")
+
+      local chatgpt_viewer
+
+      --[[--
+      内部函数：处理分析的"添加到笔记"按钮点击事件
+      @param viewer table 查看器实例
+      ]]
+      local function handleAddToNote(viewer)
+        if not ui.highlight or not ui.highlight.addNote then
+          showError(_("错误：无法找到高亮对象。"))
+          return
+        end
+
+        -- 将当前分析内容添加为笔记
+        ui.highlight:addNote(current_text)
+        UIManager:close(viewer or chatgpt_viewer)
+        if ui.highlight.onClose then
+          ui.highlight:onClose()
+        end
+      end
+
+      --[[--
+      内部函数：处理"再问一个问题"按钮点击事件（用于分析的后续重点）
+      允许用户对同一文本内容使用不同的分析重点
+
+      @param viewer table 查看器实例
+      @param new_focus string 新的分析重点
+      ]]
+      local function handleNewAnalysis(viewer, new_focus)
+        local follow_focus = trim(new_focus)
+        if follow_focus == "" then
+          return
+        end
+
+        -- 转换新的分析重点为数组
+        local follow_focus_points = {}
+        for point in follow_focus:gmatch("[^,]+") do
+          local trimmed_point = trim(point)
+          if trimmed_point ~= "" then
+            table.insert(follow_focus_points, trimmed_point)
+          end
+        end
+
+        if #follow_focus_points == 0 then
+          return
+        end
+
+        -- 使用新重点对同一内容进行分析
+        local analysis_follow = performAnalyze {
+          content = content,
+          focus_points = follow_focus_points,
+          language = options.language,
+        }
+        if not analysis_follow then
+          return
+        end
+
+        -- 格式化并追加新的分析结果
+        local follow_block = formatAnalysisBlock {
+          highlighted_text = options.highlighted_text or content,
+          focus_points = follow_focus_points,
+          analysis = analysis_follow,
+          language = options.language,
+          title = title,
+          author = author,
+        }
+        table.insert(blocks, follow_block)
+        current_text = table.concat(blocks, "\n\n")
+
+        -- 更新查看器显示
+        viewer:update(current_text)
+      end
+
+      -- 创建并显示文本分析结果查看器
+      chatgpt_viewer = ChatGPTViewer:new {
+        ui = ui,
+        title = options.viewer_title or _("Reader AI Analysis"),
+        text = current_text,
+        onAskQuestion = handleNewAnalysis, -- 绑定后续分析处理函数
+        onAddToNote = handleAddToNote,     -- 绑定添加笔记处理函数
+      }
+      UIManager:show(chatgpt_viewer)
+    end)
+  end
+
+  --[[--
   按钮回调函数：处理"Ask"按钮点击事件
   启动字典查询工作流
   ]]
@@ -876,6 +1158,21 @@ local function showChatGPTDialog(ui, highlight_source)
         highlighted_text = highlightedText,
         prompt = question,  -- 用户输入作为摘要指令
         viewer_title = _("Reader AI Summary"),
+      }
+    end,
+  })
+
+  -- 添加分析功能按钮
+  table.insert(buttons, {
+    text = _("Analyze"),  -- 分析按钮
+    callback = function()
+      local focus_input = input_dialog and trim(input_dialog:getInputText()) or ""
+      UIManager:close(input_dialog)
+      startAnalyze {
+        content = highlightedText,
+        highlighted_text = highlightedText,
+        focus_points_input = focus_input,  -- 用户输入作为分析重点
+        viewer_title = _("Reader AI Analysis"),
       }
     end,
   })

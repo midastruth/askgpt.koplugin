@@ -53,6 +53,7 @@ CONFIGURATION = load_configuration()
 local DEFAULT_READER_AI_BASE_URL = "http://192.168.0.19:8000"  -- 默认AI服务器地址
 local DEFAULT_READER_AI_DICTIONARY_PATH = "/ai/dictionary"      -- 字典查询API路径
 local DEFAULT_READER_AI_SUMMARIZE_PATH = "/ai/summarize"        -- 文本摘要API路径
+local DEFAULT_READER_AI_ANALYZE_PATH = "/ai/analyze"            -- 文本分析API路径
 
 --[[--
 网络请求配置参数
@@ -241,6 +242,11 @@ local READER_AI_ENDPOINTS = {
     path_keys          = { "reader_ai_summarize_path", "reader_ai_summary_path" },
     default_path       = DEFAULT_READER_AI_SUMMARIZE_PATH,
     terminal_patterns  = { "/ai/[^/]*$", "/ai$", "/summarize$" },
+  },
+  analyze = {
+    path_keys          = { "reader_ai_analyze_path", "reader_ai_analysis_path" },
+    default_path       = DEFAULT_READER_AI_ANALYZE_PATH,
+    terminal_patterns  = { "/ai/[^/]*$", "/ai$", "/analyze$" },
   },
 }
 
@@ -545,6 +551,59 @@ function ReaderAI.summarizeContent(params)
     summary = summary,    -- 摘要文本
     raw     = decoded,   -- 原始响应数据（可能包含其他信息）
   }
+end
+
+--[[--
+调用Reader AI文本分析服务
+提供深度文本分析和重点识别
+
+支持的参数：
+- content: 要分析的文本内容（必需）
+- focus_points: 分析重点列表（可选）
+- language: 分析语言（可选）
+
+@param params table 分析参数表
+@return table 包含分析结果的表
+@throws error 如果参数无效、网络请求失败或响应格式错误
+]]
+function ReaderAI.analyzeContent(params)
+  -- 参数验证
+  if type(params) ~= "table" then
+    error("Reader AI analyze expects a parameter table.")
+  end
+
+  local content = trim(params.content)
+  if not content or content == "" then
+    error("Reader AI analyze requires content text.")
+  end
+
+  -- 解析API端点
+  local endpoint = resolve_reader_ai_endpoint(READER_AI_ENDPOINTS.analyze)
+
+  -- 构建请求载荷
+  local payload = {
+    content = content,
+  }
+
+  -- 添加可选的focus_points
+  if params.focus_points and type(params.focus_points) == "table" then
+    payload.focus_points = params.focus_points
+  end
+
+  -- 添加语言参数
+  -- if params.language and params.language ~= "" then
+  --   payload.language = params.language
+  -- end
+
+  -- 发送请求并获取响应
+  local decoded = perform_json_post(endpoint, payload, "Reader AI analyze")
+
+  -- 验证响应格式
+  if type(decoded) ~= "table" then
+    error("Reader AI analyze response did not contain a JSON object.")
+  end
+
+  return decoded
 end
 
 -- 导出ReaderAI模块

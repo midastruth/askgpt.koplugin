@@ -42,6 +42,7 @@ local CONFIGURATION = {
     -- 自定义端点路径
     reader_ai_dictionary_path = "/ai/dictionary",
     reader_ai_summarize_path = "/ai/summarize",
+    reader_ai_analyze_path = "/ai/analyze",
     
     -- 请求头配置
     custom_headers = {
