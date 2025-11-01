@@ -198,7 +198,16 @@ end
 local function performLookup(request_opts)
   local ok, response = pcall(ReaderAI.dictionaryLookup, request_opts)
   if not ok then
-    showError(_("字典查询失败：") .. tostring(response))
+    local error_msg = tostring(response)
+    if error_msg:match("timeout") then
+      showError(_("网络请求超时，请检查网络连接后重试。"))
+    elseif error_msg:match("connection") or error_msg:match("Failed to contact") then
+      showError(_("无法连接到AI服务，请检查网络设置。"))
+    elseif error_msg:match("attempts") then
+      showError(_("网络连接失败，已重试" .. MAX_RETRY_ATTEMPTS .. "次。请检查网络后重试。"))
+    else
+      showError(_("字典查询失败：") .. error_msg)
+    end
     return nil
   end
   if type(response) ~= "table" then
@@ -211,7 +220,16 @@ end
 local function performSummarize(request_opts)
   local ok, response = pcall(ReaderAI.summarizeContent, request_opts)
   if not ok then
-    showError(_("摘要生成失败：") .. tostring(response))
+    local error_msg = tostring(response)
+    if error_msg:match("timeout") then
+      showError(_("网络请求超时，请检查网络连接后重试。"))
+    elseif error_msg:match("connection") or error_msg:match("Failed to contact") then
+      showError(_("无法连接到AI服务，请检查网络设置。"))
+    elseif error_msg:match("attempts") then
+      showError(_("网络连接失败，已重试" .. MAX_RETRY_ATTEMPTS .. "次。请检查网络后重试。"))
+    else
+      showError(_("摘要生成失败：") .. error_msg)
+    end
     return nil
   end
   if type(response) ~= "table" or type(response.summary) ~= "string" then

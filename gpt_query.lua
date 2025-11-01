@@ -2,6 +2,7 @@ local json = require("json")
 local ltn12 = require("ltn12")
 local http = require("socket.http")
 local https = require("ssl.https")
+local socket = require("socket")
 
 --[[
   Reader AI 客户端配置，仅使用新的 FastAPI 后端。
@@ -21,6 +22,11 @@ end
 local DEFAULT_READER_AI_BASE_URL = "http://192.168.0.19:8000"
 local DEFAULT_READER_AI_DICTIONARY_PATH = "/ai/dictionary"
 local DEFAULT_READER_AI_SUMMARIZE_PATH = "/ai/summarize"
+
+-- 网络请求配置
+local REQUEST_TIMEOUT = 10  -- 请求超时时间（秒）
+local MAX_RETRY_ATTEMPTS = 3  -- 最大重试次数
+local RETRY_DELAY = 2  -- 重试间隔（秒）
 
 local ReaderAI = {}
 
@@ -159,6 +165,60 @@ local function resolve_default_language(request_language)
   return "auto"
 end
 
+-- 带超时和重试机制的HTTP请求函数
+local function http_request_with_retry(request_params)
+  local request_library = choose_request_library(request_params.url)
+  local attempts = 0
+  local last_error = nil
+  
+  while attempts < MAX_RETRY_ATTEMPTS do
+    attempts = attempts + 1
+    
+    -- 设置超时
+    local old_timeout = http.TIMEOUT
+    http.TIMEOUT = REQUEST_TIMEOUT
+    if request_library == https then
+      https.TIMEOUT = REQUEST_TIMEOUT
+    end
+    
+    local response_chunks = {}
+    local request_copy = {}
+    for k, v in pairs(request_params) do
+      request_copy[k] = v
+    end
+    request_copy.sink = ltn12.sink.table(response_chunks)
+    
+    local success, res, code = pcall(function()
+      return request_library.request(request_copy)
+    end)
+    
+    -- 恢复原始超时设置
+    http.TIMEOUT = old_timeout
+    if request_library == https then
+      https.TIMEOUT = old_timeout
+    end
+    
+    if success and res and code == 200 then
+      return true, code, response_chunks
+    end
+    
+    if not success then
+      last_error = "Request failed: " .. tostring(res)
+    elseif not res then
+      last_error = "Connection failed"
+    else
+      last_error = "HTTP error: " .. tostring(code)
+    end
+    
+    -- 如果不是最后一次尝试，等待后重试
+    if attempts < MAX_RETRY_ATTEMPTS then
+      socket.sleep(RETRY_DELAY)
+    end
+  end
+  
+  return false, nil, last_error
+end
+
 -- 调用 Reader AI FastAPI 字典服务，返回解析后的词典结果表。
 function ReaderAI.dictionaryLookup(params)
   if type(params) ~= "table" then
@@ -171,8 +231,7 @@ function ReaderAI.dictionaryLookup(params)
   end
 
   local endpoint = resolve_dictionary_endpoint()
-  local request_library = choose_request_library(endpoint)
-
+  
   local payload = {
     term = term,
     language = resolve_default_language(params.language),
@@ -191,9 +250,9 @@ function ReaderAI.dictionaryLookup(params)
   end
 
   local body = json.encode(payload)
-  local response_chunks = {}
-
-  local res, code = request_library.request {
+  
+  -- 使用带重试机制的HTTP请求
+  local success, code, response_chunks = http_request_with_retry({
     url = endpoint,
     method = "POST",
     headers = {
@@ -201,11 +260,10 @@ function ReaderAI.dictionaryLookup(params)
       ["Content-Length"] = tostring(#body),
     },
     source = ltn12.source.string(body),
-    sink = ltn12.sink.table(response_chunks),
-  }
+  })
 
-  if not res then
-    error("Failed to contact Reader AI dictionary backend.")
+  if not success then
+    error("Failed to contact Reader AI dictionary backend after " .. MAX_RETRY_ATTEMPTS .. " attempts. Last error: " .. tostring(code))
   end
 
   if code ~= 200 then
@@ -238,8 +296,7 @@ function ReaderAI.summarizeContent(params)
   end
 
   local endpoint = resolve_summarize_endpoint()
-  local request_library = choose_request_library(endpoint)
-
+  
   local payload = {
     content = content,
   }
@@ -261,9 +318,9 @@ function ReaderAI.summarizeContent(params)
   end
 
   local body = json.encode(payload)
-  local response_chunks = {}
-
-  local res, code = request_library.request {
+  
+  -- 使用带重试机制的HTTP请求
+  local success, code, response_chunks = http_request_with_retry({
     url = endpoint,
     method = "POST",
     headers = {
@@ -271,11 +328,10 @@ function ReaderAI.summarizeContent(params)
       ["Content-Length"] = tostring(#body),
     },
     source = ltn12.source.string(body),
-    sink = ltn12.sink.table(response_chunks),
-  }
+  })
 
-  if not res then
-    error("Failed to contact Reader AI summarize backend.")
+  if not success then
+    error("Failed to contact Reader AI summarize backend after " .. MAX_RETRY_ATTEMPTS .. " attempts. Last error: " .. tostring(code))
   end
 
   if code ~= 200 then
