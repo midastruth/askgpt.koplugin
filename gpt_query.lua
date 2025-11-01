@@ -241,18 +241,10 @@ function ReaderAI.dictionaryLookup(params)
     payload.context = params.context
   end
 
-  local document_id = params.document_id
-  if not document_id and CONFIGURATION and CONFIGURATION.document_id then
-    document_id = CONFIGURATION.document_id
-  end
-  if document_id then
-    payload.document_id = document_id
-  end
-
   local body = json.encode(payload)
   
   -- 使用带重试机制的HTTP请求
-  local success, code, response_chunks = http_request_with_retry({
+  local success, status_code, result = http_request_with_retry({
     url = endpoint,
     method = "POST",
     headers = {
@@ -263,12 +255,18 @@ function ReaderAI.dictionaryLookup(params)
   })
 
   if not success then
-    error("Failed to contact Reader AI dictionary backend after " .. MAX_RETRY_ATTEMPTS .. " attempts. Last error: " .. tostring(code))
+    error("Failed to contact Reader AI dictionary backend after " .. MAX_RETRY_ATTEMPTS .. " attempts. Last error: " .. tostring(result))
   end
 
-  if code ~= 200 then
-    local error_body = table.concat(response_chunks)
-    error("Reader AI dictionary backend error (" .. tostring(code) .. "): " .. error_body)
+  local response_chunks = result
+
+  if type(response_chunks) ~= "table" then
+    error("Reader AI dictionary backend returned an invalid response buffer.")
+  end
+
+  if status_code ~= 200 then
+    local error_body = response_chunks and table.concat(response_chunks) or ""
+    error("Reader AI dictionary backend error (" .. tostring(status_code) .. "): " .. error_body)
   end
 
   local concatenated = table.concat(response_chunks)
@@ -305,14 +303,6 @@ function ReaderAI.summarizeContent(params)
     payload.language = params.language
   end
 
-  local document_id = params.document_id
-  if not document_id and CONFIGURATION and CONFIGURATION.document_id then
-    document_id = CONFIGURATION.document_id
-  end
-  if document_id then
-    payload.document_id = document_id
-  end
-
   if params.context and params.context ~= "" then
     payload.context = params.context
   end
@@ -320,7 +310,7 @@ function ReaderAI.summarizeContent(params)
   local body = json.encode(payload)
   
   -- 使用带重试机制的HTTP请求
-  local success, code, response_chunks = http_request_with_retry({
+  local success, status_code, result = http_request_with_retry({
     url = endpoint,
     method = "POST",
     headers = {
@@ -331,12 +321,18 @@ function ReaderAI.summarizeContent(params)
   })
 
   if not success then
-    error("Failed to contact Reader AI summarize backend after " .. MAX_RETRY_ATTEMPTS .. " attempts. Last error: " .. tostring(code))
+    error("Failed to contact Reader AI summarize backend after " .. MAX_RETRY_ATTEMPTS .. " attempts. Last error: " .. tostring(result))
   end
 
-  if code ~= 200 then
-    local error_body = table.concat(response_chunks)
-    error("Reader AI summarize backend error (" .. tostring(code) .. "): " .. error_body)
+  local response_chunks = result
+
+  if type(response_chunks) ~= "table" then
+    error("Reader AI summarize backend returned an invalid response buffer.")
+  end
+
+  if status_code ~= 200 then
+    local error_body = response_chunks and table.concat(response_chunks) or ""
+    error("Reader AI summarize backend error (" .. tostring(status_code) .. "): " .. error_body)
   end
 
   local concatenated = table.concat(response_chunks)

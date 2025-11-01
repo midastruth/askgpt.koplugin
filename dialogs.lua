@@ -243,8 +243,6 @@ local function showChatGPTDialog(ui, highlightedText)
   local props = ui.document and ui.document:getProps() or {}
   local title = props.title or _("Unknown Title")
   local author = props.authors or _("Unknown Author")
-  local document_id = CONFIGURATION and CONFIGURATION.document_id
-
   local function startLookup(options)
     local blocks = {}
     local current_text = ""
@@ -271,7 +269,6 @@ local function showChatGPTDialog(ui, highlightedText)
         term = request_term,
         language = options.language,
         context = context,
-        document_id = options.document_id or document_id,
       }
       if not dictionary then
         return
@@ -315,7 +312,6 @@ local function showChatGPTDialog(ui, highlightedText)
           term = follow_term,
           language = options.followup_language or options.language,
           context = follow_context,
-          document_id = options.document_id or document_id,
         }
         if not dictionary_follow then
           return
@@ -368,7 +364,6 @@ local function showChatGPTDialog(ui, highlightedText)
         content = content,
         language = options.language,
         context = prompt,
-        document_id = options.document_id or document_id,
       }
       if not summary then
         return
@@ -411,7 +406,6 @@ local function showChatGPTDialog(ui, highlightedText)
           content = content,
           language = options.language,
           context = follow_instruction,
-          document_id = options.document_id or document_id,
         }
         if not summary_follow then
           return
