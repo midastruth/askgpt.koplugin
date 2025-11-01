@@ -8,7 +8,7 @@ local UIManager = require("ui/uimanager")
 local function checkForUpdates()
   local response_body = {}
   local _, code = http.request {
-    url = "https://api.github.com/repos/drewbaumann/AskGPT/releases/latest",
+    url = "https://api.github.com/repos/drewbaumann/AskGPT",
     headers = {
         ["Accept"] = "application/vnd.github.v3+json"
     },
