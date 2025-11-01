@@ -1,21 +1,23 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The plugin is self-contained at the repository root. Core modules include `main.lua` for registering the "Ask ChatGPT" highlight action, `dialogs.lua` for prompt assembly and request flow, `gpt_query.lua` for HTTPS access plus configuration lookup, and `chatgptviewer.lua` for rendering responses. Metadata lives in `_meta.lua`, while `update_checker.lua` handles release notices. Keep device-specific settings in an untracked `configuration.lua`; do not duplicate secrets in source control.
+The plugin is self-contained in the repository root, with `main.lua` wiring the Ask ChatGPT highlight action, `dialogs.lua` handling user prompts, and `gpt_query.lua` performing HTTPS requests plus configuration lookup. `chatgptviewer.lua` renders responses, `_meta.lua` stores metadata, and `update_checker.lua` manages release notices. Device-specific secrets live in an untracked `configuration.lua`; avoid duplicating them elsewhere in source control.
 
 ## Build, Test, and Development Commands
-- `rsync -av --delete . user@device:/mnt/onboard/koreader/plugins/askgpt.koplugin/`: sync the plugin to a KOReader device during development (adjust path for your reader).
-- `luacheck *.lua`: lint all Lua sources for style and common runtime issues.
-- `zip -r askgpt.koplugin.zip . -x ".git/*" ".vscode/*" "configuration.lua"`: package the plugin for release without local tooling or secrets.
+- `rsync -av --delete . user@device:/mnt/onboard/koreader/plugins/askgpt.koplugin/`: Syncs the plugin to a KOReader device for live testing.
+- `luacheck *.lua`: Lints all Lua sources to catch style and runtime issues.
+- `zip -r askgpt.koplugin.zip . -x ".git/*" ".vscode/*" "configuration.lua"`: Packages a release-ready archive without local tooling or secrets.
 
 ## Coding Style & Naming Conventions
-Use two-space indentation and keep lines under 120 characters. Modules return a table exposing the public API, and exported tables use `UpperCamelCase` (e.g., `Dialogs`). Prefer `lower_snake_case` for locals unless surrounding code uses lowerCamelCase. Align table keys and string literals for readability, and wrap user-facing strings with `_()` to integrate KOReader’s gettext translations.
+Use two-space indentation, keep lines under 120 characters, and follow KOReader patterns. Modules return tables with `UpperCamelCase` names (e.g., `Dialogs`), while locals prefer `lower_snake_case` unless surrounding code differs. Wrap user-visible strings with `_()` for gettext, align table keys for readability, and rely on `luacheck` for consistent formatting.
 
 ## Testing Guidelines
-Automated tests are not available. Validate changes by loading the plugin in KOReader, highlighting sample text, and confirming the dialog, network request, and viewer output all behave correctly. Exercise both online and offline scenarios so `NetworkMgr` fallbacks remain stable, and ensure missing configuration keys fall back to defaults without runtime errors.
+Automated tests are unavailable; verify changes on-device. Load the plugin, highlight sample text, and confirm dialog flow, network requests, and viewer output in both online and offline scenarios. Ensure missing configuration keys fall back gracefully without runtime errors.
 
 ## Commit & Pull Request Guidelines
-Write present-tense commit subjects such as `dialogs: improve translate toggle`, adding wrapped body text when extra context is helpful. Pull requests should summarize user-visible changes, mention manual verification steps, link related issues or forum threads, and provide screenshots for UI adjustments. Confirm that `configuration.lua` is excluded before sharing patches.
+- **Commit subjects**: Use present-tense prefixes like `dialogs: improve translate toggle` with optional wrapped body context.
+- **Pull requests**: Summarize user-facing changes, document manual verification steps, and link related issues or forum threads.
+- **UI updates**: Include screenshots or short videos demonstrating dialogs or viewer changes.
 
 ## Security & Configuration Tips
-Never commit working API keys or personal endpoints. Store credentials in an untracked `configuration.lua` or rely on a documented sample file. Only use HTTPS endpoints, validate any user-provided prompts before sending upstream, and guard against unexpected `nil` responses when parsing ChatGPT results to prevent crashes on devices.
+Restrict network calls to HTTPS endpoints via `gpt_query.lua`, validate prompts before sending upstream, and guard against `nil` fields in ChatGPT responses. Store API keys or personal endpoints only in `configuration.lua`, confirming the file remains git-ignored before sharing patches or releases.

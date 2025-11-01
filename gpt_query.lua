@@ -1,8 +1,8 @@
-local json = require("json")
-local ltn12 = require("ltn12")
-local http = require("socket.http")
-local https = require("ssl.https")
-local socket = require("socket")
+local json    = require("json")
+local ltn12   = require("ltn12")
+local http    = require("socket.http")
+local https   = require("ssl.https")
+local socket  = require("socket")
 
 --[[
   Reader AI 客户端配置，仅使用新的 FastAPI 后端。
@@ -10,13 +10,20 @@ local socket = require("socket")
 ]]
 local CONFIGURATION = nil
 
--- 尝试加载 configuration.lua，如果不存在则保持默认。
-local success, result = pcall(function() return require("configuration") end)
-if success then
-  CONFIGURATION = result
-else
+local function load_configuration()
+  local success, result = pcall(function()
+    return require("configuration")
+  end)
+
+  if success then
+    return result
+  end
+
   print("configuration.lua not found, skipping...")
+  return nil
 end
+
+CONFIGURATION = load_configuration()
 
 -- Reader AI 默认服务地址与路径。
 local DEFAULT_READER_AI_BASE_URL = "http://192.168.0.19:8000"
@@ -40,6 +47,14 @@ local function choose_request_library(url)
     return https
   end
   return http
+end
+
+local function clone_table(source)
+  local copy = {}
+  for key, value in pairs(source) do
+    copy[key] = value
+  end
+  return copy
 end
 
 local function resolve_base_url()
@@ -117,35 +132,21 @@ local function resolve_endpoint(path_keys, default_path, terminal_patterns)
   return base .. path
 end
 
-local function resolve_dictionary_endpoint()
-  return resolve_endpoint(
-    {
-      "reader_ai_dictionary_path",
-      "reader_ai_generate_path",
-      "generate_endpoint",
-    },
-    DEFAULT_READER_AI_DICTIONARY_PATH,
-    {
-      "/ai/[^/]*$",
-      "/ai$",
-      "/dictionary$",
-    }
-  )
-end
+local READER_AI_ENDPOINTS = {
+  dictionary = {
+    path_keys          = { "reader_ai_dictionary_path", "reader_ai_generate_path", "generate_endpoint" },
+    default_path       = DEFAULT_READER_AI_DICTIONARY_PATH,
+    terminal_patterns  = { "/ai/[^/]*$", "/ai$", "/dictionary$" },
+  },
+  summarize = {
+    path_keys          = { "reader_ai_summarize_path", "reader_ai_summary_path" },
+    default_path       = DEFAULT_READER_AI_SUMMARIZE_PATH,
+    terminal_patterns  = { "/ai/[^/]*$", "/ai$", "/summarize$" },
+  },
+}
 
-local function resolve_summarize_endpoint()
-  return resolve_endpoint(
-    {
-      "reader_ai_summarize_path",
-      "reader_ai_summary_path",
-    },
-    DEFAULT_READER_AI_SUMMARIZE_PATH,
-    {
-      "/ai/[^/]*$",
-      "/ai$",
-      "/summarize$",
-    }
-  )
+local function resolve_reader_ai_endpoint(definition)
+  return resolve_endpoint(definition.path_keys, definition.default_path, definition.terminal_patterns)
 end
 
 local function resolve_default_language(request_language)
@@ -170,38 +171,30 @@ local function http_request_with_retry(request_params)
   local request_library = choose_request_library(request_params.url)
   local attempts = 0
   local last_error = nil
-  
+
   while attempts < MAX_RETRY_ATTEMPTS do
     attempts = attempts + 1
-    
-    -- 设置超时
-    local old_timeout = http.TIMEOUT
-    http.TIMEOUT = REQUEST_TIMEOUT
-    if request_library == https then
-      https.TIMEOUT = REQUEST_TIMEOUT
-    end
-    
+
+    local previous_http_timeout  = http.TIMEOUT
+    local previous_https_timeout = https.TIMEOUT
+    http.TIMEOUT  = REQUEST_TIMEOUT
+    https.TIMEOUT = REQUEST_TIMEOUT
+
     local response_chunks = {}
-    local request_copy = {}
-    for k, v in pairs(request_params) do
-      request_copy[k] = v
-    end
-    request_copy.sink = ltn12.sink.table(response_chunks)
-    
+    local request_copy    = clone_table(request_params)
+    request_copy.sink     = ltn12.sink.table(response_chunks)
+
     local success, res, code = pcall(function()
       return request_library.request(request_copy)
     end)
-    
-    -- 恢复原始超时设置
-    http.TIMEOUT = old_timeout
-    if request_library == https then
-      https.TIMEOUT = old_timeout
-    end
-    
+
+    http.TIMEOUT  = previous_http_timeout
+    https.TIMEOUT = previous_https_timeout
+
     if success and res and code == 200 then
       return true, code, response_chunks
     end
-    
+
     if not success then
       last_error = "Request failed: " .. tostring(res)
     elseif not res then
@@ -209,14 +202,58 @@ local function http_request_with_retry(request_params)
     else
       last_error = "HTTP error: " .. tostring(code)
     end
-    
-    -- 如果不是最后一次尝试，等待后重试
+
     if attempts < MAX_RETRY_ATTEMPTS then
       socket.sleep(RETRY_DELAY)
     end
   end
-  
+
   return false, nil, last_error
+end
+
+local function perform_json_post(endpoint, payload, context_label)
+  local body = json.encode(payload)
+
+  local success, status_code, response_chunks = http_request_with_retry({
+    url     = endpoint,
+    method  = "POST",
+    headers = {
+      ["Content-Type"]   = "application/json",
+      ["Content-Length"] = tostring(#body),
+    },
+    source  = ltn12.source.string(body),
+  })
+
+  if not success then
+    error(string.format(
+      "Failed to contact %s backend after %d attempts. Last error: %s",
+      context_label,
+      MAX_RETRY_ATTEMPTS,
+      tostring(response_chunks)
+    ))
+  end
+
+  if type(response_chunks) ~= "table" then
+    error(string.format("%s backend returned an invalid response buffer.", context_label))
+  end
+
+  local response_body = table.concat(response_chunks)
+
+  if status_code ~= 200 then
+    error(string.format(
+      "%s backend error (%s): %s",
+      context_label,
+      tostring(status_code),
+      response_body
+    ))
+  end
+
+  local ok, decoded = pcall(json.decode, response_body)
+  if not ok then
+    error(string.format("Failed to decode %s response: %s", context_label, response_body))
+  end
+
+  return decoded, response_body
 end
 
 -- 调用 Reader AI FastAPI 字典服务，返回解析后的词典结果表。
@@ -230,10 +267,10 @@ function ReaderAI.dictionaryLookup(params)
     error("Reader AI dictionary query requires a term.")
   end
 
-  local endpoint = resolve_dictionary_endpoint()
-  
+  local endpoint = resolve_reader_ai_endpoint(READER_AI_ENDPOINTS.dictionary)
+
   local payload = {
-    term = term,
+    term     = term,
     language = resolve_default_language(params.language),
   }
 
@@ -241,38 +278,10 @@ function ReaderAI.dictionaryLookup(params)
     payload.context = params.context
   end
 
-  local body = json.encode(payload)
-  
-  -- 使用带重试机制的HTTP请求
-  local success, status_code, result = http_request_with_retry({
-    url = endpoint,
-    method = "POST",
-    headers = {
-      ["Content-Type"] = "application/json",
-      ["Content-Length"] = tostring(#body),
-    },
-    source = ltn12.source.string(body),
-  })
+  local decoded = perform_json_post(endpoint, payload, "Reader AI dictionary")
 
-  if not success then
-    error("Failed to contact Reader AI dictionary backend after " .. MAX_RETRY_ATTEMPTS .. " attempts. Last error: " .. tostring(result))
-  end
-
-  local response_chunks = result
-
-  if type(response_chunks) ~= "table" then
-    error("Reader AI dictionary backend returned an invalid response buffer.")
-  end
-
-  if status_code ~= 200 then
-    local error_body = response_chunks and table.concat(response_chunks) or ""
-    error("Reader AI dictionary backend error (" .. tostring(status_code) .. "): " .. error_body)
-  end
-
-  local concatenated = table.concat(response_chunks)
-  local ok, decoded = pcall(json.decode, concatenated)
-  if not ok or type(decoded) ~= "table" then
-    error("Failed to decode Reader AI dictionary response: " .. concatenated)
+  if type(decoded) ~= "table" then
+    error("Reader AI dictionary response did not contain a JSON object.")
   end
 
   if decoded.definition == nil and decoded.output ~= nil and type(decoded.output) ~= "table" then
@@ -293,8 +302,8 @@ function ReaderAI.summarizeContent(params)
     error("Reader AI summarize requires content text.")
   end
 
-  local endpoint = resolve_summarize_endpoint()
-  
+  local endpoint = resolve_reader_ai_endpoint(READER_AI_ENDPOINTS.summarize)
+
   local payload = {
     content = content,
   }
@@ -307,39 +316,7 @@ function ReaderAI.summarizeContent(params)
     payload.context = params.context
   end
 
-  local body = json.encode(payload)
-  
-  -- 使用带重试机制的HTTP请求
-  local success, status_code, result = http_request_with_retry({
-    url = endpoint,
-    method = "POST",
-    headers = {
-      ["Content-Type"] = "application/json",
-      ["Content-Length"] = tostring(#body),
-    },
-    source = ltn12.source.string(body),
-  })
-
-  if not success then
-    error("Failed to contact Reader AI summarize backend after " .. MAX_RETRY_ATTEMPTS .. " attempts. Last error: " .. tostring(result))
-  end
-
-  local response_chunks = result
-
-  if type(response_chunks) ~= "table" then
-    error("Reader AI summarize backend returned an invalid response buffer.")
-  end
-
-  if status_code ~= 200 then
-    local error_body = response_chunks and table.concat(response_chunks) or ""
-    error("Reader AI summarize backend error (" .. tostring(status_code) .. "): " .. error_body)
-  end
-
-  local concatenated = table.concat(response_chunks)
-  local ok, decoded = pcall(json.decode, concatenated)
-  if not ok then
-    error("Failed to decode Reader AI summarize response: " .. concatenated)
-  end
+local decoded = perform_json_post(endpoint, payload, "Reader AI summarize")
 
   local summary
   if type(decoded) == "table" then
@@ -347,6 +324,8 @@ function ReaderAI.summarizeContent(params)
   elseif type(decoded) == "string" then
     summary = decoded
     decoded = { summary = decoded }
+  else
+    error("Reader AI summarize response did not contain a JSON object or string.")
   end
 
   if type(summary) ~= "string" or summary == "" then
@@ -355,7 +334,7 @@ function ReaderAI.summarizeContent(params)
 
   return {
     summary = summary,
-    raw = decoded,
+    raw     = decoded,
   }
 end
 
