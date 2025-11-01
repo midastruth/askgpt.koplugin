@@ -880,20 +880,20 @@ local function showChatGPTDialog(ui, highlight_source)
     end,
   })
 
-  -- 根据配置添加翻译功能按钮
+  -- 根据配置添加字典查询功能按钮（含翻译）
   if CONFIGURATION and CONFIGURATION.features and CONFIGURATION.features.translate_to and CONFIGURATION.features.translate_to ~= "" then
     local target_language = CONFIGURATION.features.translate_to
     table.insert(buttons, {
-      text = _("Translate"),  -- 翻译按钮
+      text = _("Dictionary"),  -- 字典按钮
       callback = function()
         UIManager:close(input_dialog)
         startLookup {
           term = highlightedText,
           highlighted_text = highlightedText,
-          question = _("Translate to ") .. target_language,
+          question = _("Dictionary lookup with ") .. target_language .. _(" translation"),
           language = target_language,
           request_language = "auto",        -- 自动检测源语言
-          viewer_title = _("Translation"),
+          viewer_title = _("Dictionary"),
           followup_language = target_language,
           followup_request_language = "auto",
           context = highlightedContext,     -- 使用高亮上下文

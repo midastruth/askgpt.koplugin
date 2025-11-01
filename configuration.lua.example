@@ -20,8 +20,8 @@ local CONFIGURATION = {
   
   -- 功能特性配置
   features = {
-    -- 翻译目标语言
-    translate_to = "zh",  -- 可选：zh, en, ja, ko等
+    -- 字典查询的目标语言（包含翻译功能）
+    translate_to = "zh",  -- 可选：zh, en, ja, ko等，启用字典按钮
     
     -- 字典查询语言
     dictionary_language = "auto",  -- 字典查询的默认语言
