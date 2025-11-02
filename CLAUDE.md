@@ -53,9 +53,13 @@ local CONFIGURATION = {
     reader_ai_dictionary_path = "/ai/dictionary",
     reader_ai_summarize_path = "/ai/summarize",
     features = {
-        translate_to = "Chinese",
-        askQuestions = true,
-        aiDictionary = true,
+        translate_to = "zh",  -- Chinese is the default
+        dictionary_language = "auto",
+    },
+    network = {
+        timeout = 10,  -- Network timeout in seconds
+        retry_attempts = 3,  -- Max retry attempts
+        retry_delay = 2,  -- Retry delay in seconds
     }
 }
 ```
@@ -69,7 +73,7 @@ The plugin supports multiple AI backends through `configuration.lua`:
 - **Local APIs** - Ollama or other local LLM services
 - **Translation** - Configurable target language via `features.translate_to` (defaults to Chinese)
 
-Network robustness features include automatic retry (3 attempts), 1000s timeout (increased from 10s for slow API responses), and graceful error handling.
+Network robustness features include automatic retry (3 attempts with 2s delays), 1000s timeout (increased from 10s for slow API responses), and graceful error handling with localized Chinese error messages.
 
 ## File Structure & Responsibilities
 
