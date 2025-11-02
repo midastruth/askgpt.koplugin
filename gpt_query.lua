@@ -107,6 +107,59 @@ local function clone_table(source)
 end
 
 --[[--
+提取错误消息的可读描述
+尝试解析后端返回的JSON错误体，优先提取常见字段（detail/message/error），
+否则返回原始字符串（去除首尾空格）
+
+@param raw_error any 后端返回的原始错误内容
+@return string|nil 可读的错误消息；无法解析时返回nil
+]]
+local function extract_error_detail(raw_error)
+  if raw_error == nil then
+    return nil
+  end
+
+  if type(raw_error) ~= "string" then
+    raw_error = tostring(raw_error)
+  end
+
+  local message = trim(raw_error)
+  if message == "" then
+    return nil
+  end
+
+  local first_char = message:sub(1, 1)
+  if first_char == "{" or first_char == "[" then
+    local ok, decoded = pcall(json.decode, message)
+    if ok and type(decoded) == "table" then
+      local detail = decoded.detail or decoded.message or decoded.error or decoded.error_description
+      if detail ~= nil then
+        if type(detail) == "table" then
+          local encode_ok, encoded = pcall(json.encode, detail)
+          if encode_ok then
+            detail = encoded
+          else
+            detail = tostring(detail)
+          end
+        end
+
+        if type(detail) == "string" then
+          detail = trim(detail)
+        else
+          detail = tostring(detail)
+        end
+
+        if detail ~= "" then
+          return detail
+        end
+      end
+    end
+  end
+
+  return message
+end
+
+--[[--
 解析AI服务的基础URL地址
 优先使用用户配置，配置缺失时使用默认地址
 
@@ -309,9 +362,12 @@ end
 @return boolean, number|nil, table|string 成功标志、状态码、响应数据或错误信息
 ]]
 local function http_request_with_retry(request_params)
-  local request_library = choose_request_library(request_params.url)
-  local attempts = 0
-  local last_error = nil
+  local request_library  = choose_request_library(request_params.url)
+  local attempts         = 0
+  local last_error       = nil
+  local last_status_code = nil
+  local last_error_text  = nil
+  local last_status_line = nil
 
   while attempts < MAX_RETRY_ATTEMPTS do
     attempts = attempts + 1
@@ -328,7 +384,7 @@ local function http_request_with_retry(request_params)
     request_copy.sink     = ltn12.sink.table(response_chunks)
 
     -- 执行HTTP请求，使用pcall保护调用
-    local success, res, code = pcall(function()
+    local success, res, code, _, status_line = pcall(function()
       return request_library.request(request_copy)
     end)
 
@@ -337,12 +393,37 @@ local function http_request_with_retry(request_params)
     https.TIMEOUT = previous_https_timeout
 
     -- 检查请求是否成功
-    if success and res and code == 200 then
-      return true, code, response_chunks
+    local status_code = tonumber(code) or code
+    if success and res and status_code == 200 then
+      return true, status_code, response_chunks
     end
 
     -- 记录错误信息
-    if not success then
+    if success and status_code then
+      local response_body = ""
+      if type(response_chunks) == "table" then
+        response_body = table.concat(response_chunks)
+      elseif type(response_chunks) == "string" then
+        response_body = response_chunks
+      end
+
+      last_status_code = status_code
+      last_status_line = status_line
+      last_error_text  = extract_error_detail(response_body) or extract_error_detail(status_line)
+
+      if not last_error_text or last_error_text == "" then
+        if response_body and response_body ~= "" then
+          last_error_text = response_body
+        elseif status_line and status_line ~= "" then
+          last_error_text = status_line
+        else
+          last_error_text = "HTTP status " .. tostring(status_code)
+        end
+      end
+
+      last_error = nil
+      break
+    elseif not success then
       last_error = "Request failed: " .. tostring(res)  -- pcall失败
     elseif not res then
       last_error = "Connection failed"                  -- 连接失败
@@ -357,6 +438,10 @@ local function http_request_with_retry(request_params)
   end
 
   -- 所有重试都失败
+  if last_status_code then
+    return false, last_status_code, last_error_text or last_status_line
+  end
+
   return false, nil, last_error
 end
 
@@ -394,6 +479,16 @@ local function perform_json_post(endpoint, payload, context_label)
 
   -- 检查请求是否成功
   if not success then
+    if status_code then
+      local friendly_error = extract_error_detail(response_chunks) or tostring(response_chunks or "")
+      error(string.format(
+        "%s backend returned HTTP %s: %s",
+        context_label,
+        tostring(status_code),
+        friendly_error ~= "" and friendly_error or "unknown error"
+      ))
+    end
+
     error(string.format(
       "Failed to contact %s backend after %d attempts. Last error: %s",
       context_label,
