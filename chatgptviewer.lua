@@ -63,7 +63,7 @@ local ChatGPTViewer = InputContainer:extend {
   title_shrink_font_to_fit = nil,        -- 自动缩小字体适应（详见TitleBar）
   
   -- 文本显示配置
-  text_face = Font:getFace("x_smallinfofont"),  -- 正文字体
+  text_face = Font:getFace("infofont"),  -- 正文字体
   fgcolor = Blitbuffer.COLOR_BLACK,            -- 前景色（黑色）
   text_padding = Size.padding.large,           -- 文本内边距
   text_margin = Size.margin.small,             -- 文本外边距
