@@ -559,6 +559,7 @@ function ChatGPTViewer:update(new_text)
   UIManager:close(self)  -- 关闭当前对话框
   -- 创建新的查看器实例
   local updated_viewer = ChatGPTViewer:new {
+    ui = self.ui,
     title = self.title,
     text = new_text,
     width = self.width,
