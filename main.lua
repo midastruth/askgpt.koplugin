@@ -7,6 +7,7 @@ local _ = require("gettext")
 
 local Config           = require("askgpt.config")
 local DialogController = require("askgpt.dialog_controller")
+local BackgroundJobs   = require("askgpt.background_jobs")
 local UpdateChecker    = require("update_checker")
 
 local AskGPT = InputContainer:new {
@@ -60,6 +61,16 @@ function AskGPT:init()
       end,
     }
   end)
+end
+
+-- "稍后查看"入口：在 Reader 主菜单注册 AskGPT Results 条目
+function AskGPT:addToMainMenu(menu_items)
+  menu_items.askgpt_results = {
+    text = _("AskGPT Recent Results"),
+    callback = function()
+      BackgroundJobs.show_results_menu(self.ui)
+    end,
+  }
 end
 
 return AskGPT

@@ -335,7 +335,9 @@ end
 添加笔记功能 - 调用外部回调函数处理笔记添加
 ]]
 function ChatGPTViewer:addToNote()
-  self:onAddToNote()
+  if self.onAddToNote then
+    self:onAddToNote()
+  end
 end
 
 --[[--
@@ -421,10 +423,13 @@ end
 关闭对话框 - 清理资源并触发回调
 ]]
 function ChatGPTViewer:onClose()
-  UIManager:close(self)           -- 关闭当前对话框
-  self.ui.highlight:onClose()     -- 关闭高亮功能
+  UIManager:close(self)
+  -- 后台结果打开的 viewer 没有活跃高亮上下文，安全检查后再调用
+  if self.ui and self.ui.highlight and self.ui.highlight.onClose then
+    self.ui.highlight:onClose()
+  end
   if self.close_callback then
-    self.close_callback()         -- 触发关闭回调
+    self.close_callback()
   end
   return true
 end

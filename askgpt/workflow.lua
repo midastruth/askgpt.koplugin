@@ -1,15 +1,15 @@
 -- 任务执行入口：lookup / summarize / analyze
--- 公开接口不变；重复的 loading/blocks/viewer/add-note/follow-up 逻辑统一走
--- 内部 run_viewer_workflow(spec)
+-- lookup 同步；summarize / analyze 路由到 background_jobs（子进程）
 local UIManager     = require("ui/uimanager")
 local InfoMessage   = require("ui/widget/infomessage")
 local ChatGPTViewer = require("chatgptviewer")
 local _ = require("gettext")
 
-local AiClient  = require("askgpt.ai_client")
-local Errors    = require("askgpt.errors")
-local Formatter = require("askgpt.formatter")
-local Util      = require("askgpt.util")
+local AiClient         = require("askgpt.ai_client")
+local Errors           = require("askgpt.errors")
+local Formatter        = require("askgpt.formatter")
+local Util             = require("askgpt.util")
+local BackgroundJobs   = require("askgpt.background_jobs")
 
 local Workflow = {}
 
@@ -184,141 +184,22 @@ function Workflow.lookup(ui, options, default_highlighted)
   })
 end
 
--- ── Summarize ─────────────────────────────────────────────────────────────────
+-- ── Summarize → 后台执行 ──────────────────────────────────────────────────────
 
+-- 提交摘要到后台子进程；立即返回，不阻塞 UI
 -- options: content, highlighted_text, prompt, language, viewer_title
 function Workflow.summarize(ui, options, default_highlighted)
-  local content = Util.trim(
-    options.content or options.highlighted_text or default_highlighted or ""
-  )
-  if content == "" then
-    Errors.show(_("内容不能为空。"))
-    return
-  end
-
-  local prompt = Util.trim(options.prompt or "")
   local doc_title, doc_author = get_doc_props(ui)
-
-  run_viewer_workflow({
-    ui           = ui,
-    viewer_title = options.viewer_title or _("Reader AI Summary"),
-
-    call_ai = function()
-      local ok, summary = pcall(AiClient.summarizeContent, {
-        content  = content,
-        language = options.language,
-        context  = prompt,
-      })
-      if not ok then
-        Errors.show_request_error(summary, _("摘要生成"))
-        return nil
-      end
-      if type(summary) ~= "table" or type(summary.summary) ~= "string" then
-        Errors.show(_("摘要返回格式无效。"))
-        return nil
-      end
-      return Formatter.summary {
-        highlighted_text = options.highlighted_text or content,
-        prompt           = prompt,
-        summary          = summary.summary,
-        details          = summary.raw,
-        language         = options.language,
-        title            = doc_title,
-        author           = doc_author,
-      }
-    end,
-
-    call_followup = function(input)
-      local ok2, summary_follow = pcall(AiClient.summarizeContent, {
-        content  = content,
-        language = options.language,
-        context  = input,
-      })
-      if not ok2 then
-        Errors.show_request_error(summary_follow, _("摘要生成"))
-        return nil
-      end
-      return Formatter.summary {
-        highlighted_text = options.highlighted_text or content,
-        prompt           = input,
-        summary          = summary_follow.summary,
-        details          = summary_follow.raw,
-        language         = options.language,
-        title            = doc_title,
-        author           = doc_author,
-      }
-    end,
-  })
+  BackgroundJobs.submit_summary(ui, options, default_highlighted, doc_title, doc_author)
 end
 
--- ── Analyze ───────────────────────────────────────────────────────────────────
+-- ── Analyze → 后台执行 ────────────────────────────────────────────────────────
 
+-- 提交分析到后台子进程；立即返回，不阻塞 UI
 -- options: content, highlighted_text, focus_points_input, language, viewer_title
 function Workflow.analyze(ui, options, default_highlighted)
-  local content = Util.trim(
-    options.content or options.highlighted_text or default_highlighted or ""
-  )
-  if content == "" then
-    Errors.show(_("内容不能为空。"))
-    return
-  end
-
-  local focus_input  = Util.trim(options.focus_points_input or "")
-  local focus_points = focus_input ~= "" and Util.split_csv(focus_input) or nil
-  if focus_points and #focus_points == 0 then focus_points = nil end
-
   local doc_title, doc_author = get_doc_props(ui)
-
-  run_viewer_workflow({
-    ui           = ui,
-    viewer_title = options.viewer_title or _("Reader AI Analysis"),
-
-    call_ai = function()
-      local ok, analysis_result = pcall(AiClient.analyzeContent, {
-        content      = content,
-        focus_points = focus_points,
-        language     = options.language,
-      })
-      if not ok then
-        Errors.show_request_error(analysis_result, _("文本分析"))
-        return nil
-      end
-      if type(analysis_result) ~= "table" then
-        Errors.show(_("分析返回格式无效。"))
-        return nil
-      end
-      return Formatter.analysis {
-        highlighted_text = options.highlighted_text or content,
-        focus_points     = focus_points,
-        analysis         = analysis_result,
-        language         = options.language,
-        title            = doc_title,
-        author           = doc_author,
-      }
-    end,
-
-    call_followup = function(input)
-      local follow_fp = Util.split_csv(input)
-      if #follow_fp == 0 then return nil end
-      local ok2, analysis_follow = pcall(AiClient.analyzeContent, {
-        content      = content,
-        focus_points = follow_fp,
-        language     = options.language,
-      })
-      if not ok2 then
-        Errors.show_request_error(analysis_follow, _("文本分析"))
-        return nil
-      end
-      return Formatter.analysis {
-        highlighted_text = options.highlighted_text or content,
-        focus_points     = follow_fp,
-        analysis         = analysis_follow,
-        language         = options.language,
-        title            = doc_title,
-        author           = doc_author,
-      }
-    end,
-  })
+  BackgroundJobs.submit_analyze(ui, options, default_highlighted, doc_title, doc_author)
 end
 
 return Workflow
