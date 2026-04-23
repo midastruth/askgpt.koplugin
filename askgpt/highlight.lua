@@ -38,18 +38,13 @@ function Highlight.extract(source)
     local selected = source.selected_text or source
     if type(selected) == "table" then
       highlighted_text = selected.text or highlighted_text
-      local candidates = {
-        selected.context,
-        selected.paragraph,
-        selected.sentence,
-        selected.snippet,
-        selected.selection_context,
-        selected.text_block,
-        selected.full_text,
-        selected.extended_text,
+      -- Iterate over field names so ipairs never stops early on a nil value.
+      local candidate_fields = {
+        "context", "paragraph", "sentence", "snippet",
+        "selection_context", "text_block", "full_text", "extended_text",
       }
-      for _, candidate in ipairs(candidates) do
-        local t = extract_string(candidate)
+      for _, field in ipairs(candidate_fields) do
+        local t = extract_string(selected[field])
         if t and t ~= "" then
           context_text = t
           break
