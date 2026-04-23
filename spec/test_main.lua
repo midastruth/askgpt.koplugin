@@ -50,8 +50,8 @@ end)
 
 H.eq("init() calls registerToMainMenu once", #reg_calls, 1)
 H.eq("init() calls addToHighlightDialog once", #add_calls, 1)
-H.eq("addToHighlightDialog key is 'askgpt_ChatGPT'",
-     add_calls[1] and add_calls[1].key, "askgpt_ChatGPT")
+H.eq("addToHighlightDialog key is 'askgpt_GPT'",
+     add_calls[1] and add_calls[1].key, "askgpt_GPT")
 
 -- The factory function returned to addToHighlightDialog should produce a table
 -- with .text and .callback

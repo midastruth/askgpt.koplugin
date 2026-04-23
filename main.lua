@@ -40,9 +40,9 @@ function AskGPT:init()
   -- 注册主菜单条目（AskGPT Recent Results），必须在 init 里调用
   self.ui.menu:registerToMainMenu(self)
 
-  self.ui.highlight:addToHighlightDialog("askgpt_ChatGPT", function(_reader_highlight_instance)
+  self.ui.highlight:addToHighlightDialog("askgpt_GPT", function(_reader_highlight_instance)
     return {
-      text    = _("Ask ChatGPT"),
+      text    = _("Ask GPT"),
       enabled = Device:hasClipboard(),
       callback = function()
         if not checkNetworkAndConfig() then return end
