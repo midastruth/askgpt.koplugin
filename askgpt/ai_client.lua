@@ -13,7 +13,6 @@ local REQUEST_TIMEOUT    = 10   -- 秒
 local MAX_RETRY_ATTEMPTS = 3
 local RETRY_DELAY        = 2    -- 秒
 
-local DEFAULT_BASE_URL        = "http://192.168.0.19:8000"
 local DEFAULT_DICTIONARY_PATH = "/ai/dictionary"
 local DEFAULT_SUMMARIZE_PATH  = "/ai/summarize"
 local DEFAULT_ANALYZE_PATH    = "/ai/analyze"
@@ -54,19 +53,23 @@ end
 
 -- ── endpoint 解析 ─────────────────────────────────────────────────────────
 
+-- 与 config.validate() 严格一致：无有效 endpoint 时直接 error，不静默回退
 local function resolve_base_url()
-  local cfg  = Config.get()
-  local base = DEFAULT_BASE_URL
+  local cfg = Config.get()
   if cfg then
-    if cfg.reader_ai_base_url and cfg.reader_ai_base_url ~= "" then
-      base = cfg.reader_ai_base_url
-    elseif cfg.base_url and cfg.base_url ~= ""
+    if type(cfg.reader_ai_base_url) == "string" and cfg.reader_ai_base_url ~= "" then
+      local base = cfg.reader_ai_base_url
+      if base:sub(-1) == "/" then base = base:sub(1, -2) end
+      return base
+    end
+    if type(cfg.base_url) == "string" and cfg.base_url ~= ""
         and not cfg.base_url:match("/chat/completions") then
-      base = cfg.base_url
+      local base = cfg.base_url
+      if base:sub(-1) == "/" then base = base:sub(1, -2) end
+      return base
     end
   end
-  if base:sub(-1) == "/" then base = base:sub(1, -2) end
-  return base
+  error("No valid API endpoint configured (set reader_ai_base_url or a non-OpenAI base_url)")
 end
 
 local function pick_config_path(key)
