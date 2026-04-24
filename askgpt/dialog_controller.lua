@@ -31,6 +31,7 @@ function DialogController.show(ui, highlight_source)
           term             = highlighted_text,
           highlighted_text = highlighted_text,
           question         = question,
+          action           = "ask",
           viewer_title     = _("Reader AI Dictionary"),
         }, highlighted_text)
       end,
@@ -75,6 +76,7 @@ function DialogController.show(ui, highlight_source)
           term                    = highlighted_text,
           highlighted_text        = highlighted_text,
           question                = _("Dictionary lookup with ") .. target_language .. _(" translation"),
+          action                  = "dictionary",
           language                = target_language,
           request_language        = "auto",
           viewer_title            = _("Dictionary"),

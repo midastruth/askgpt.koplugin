@@ -26,7 +26,7 @@ local POLL_GROWTH  = 1.5   -- 每轮乘以该系数
 
 -- ── 内部工具 ──────────────────────────────────────────────────────────────────
 
-local function new_job(kind, viewer_title, highlighted_text, doc_title, doc_author)
+local function new_job(kind, viewer_title, highlighted_text, doc_title, doc_author, doc_file_sha256)
   local id  = _next_id
   _next_id  = _next_id + 1
   local job = {
@@ -38,6 +38,7 @@ local function new_job(kind, viewer_title, highlighted_text, doc_title, doc_auth
     highlighted_text = highlighted_text,
     doc_title        = doc_title,
     doc_author       = doc_author,
+    doc_file_sha256  = doc_file_sha256,
     result_text      = nil,
     error_message    = nil,
     pid              = nil,
@@ -134,14 +135,31 @@ end
 
 -- ── 子进程任务体（捕获父进程 upvalue，fork 后在子进程运行）──────────────────────
 
+local function build_book(doc_title, doc_author, doc_file_sha256)
+  local book = {
+    sha256 = doc_file_sha256,
+    title  = doc_title,
+    author = doc_author,
+  }
+  for _, value in pairs(book) do
+    if value ~= nil and value ~= "" then return book end
+  end
+  return nil
+end
+
 local function make_summarize_task(content, prompt, language,
-                                    highlighted_text, doc_title, doc_author)
+                                    highlighted_text, doc_title, doc_author,
+                                    doc_file_sha256, doc_location)
   return function(_pid, child_write_fd)
     local result_text, err_msg
     local ok, summary = pcall(AiClient.summarizeContent, {
-      content  = content,
-      language = language,
-      context  = prompt,
+      content     = content,
+      question    = prompt,
+      language    = language,
+      context     = prompt,
+      file_sha256 = doc_file_sha256,
+      book        = build_book(doc_title, doc_author, doc_file_sha256),
+      location    = doc_location,
     })
     if not ok then
       err_msg = tostring(summary)
@@ -156,6 +174,7 @@ local function make_summarize_task(content, prompt, language,
         language         = language,
         title            = doc_title,
         author           = doc_author,
+        file_sha256      = doc_file_sha256,
       }
     end
     local out = result_text
@@ -166,13 +185,18 @@ local function make_summarize_task(content, prompt, language,
 end
 
 local function make_analyze_task(content, focus_points, language,
-                                   highlighted_text, doc_title, doc_author)
+                                   highlighted_text, doc_title, doc_author,
+                                   doc_file_sha256, doc_location)
   return function(_pid, child_write_fd)
     local result_text, err_msg
     local ok, analysis = pcall(AiClient.analyzeContent, {
       content      = content,
       focus_points = focus_points,
+      question     = focus_points and table.concat(focus_points, ", ") or nil,
       language     = language,
+      file_sha256  = doc_file_sha256,
+      book         = build_book(doc_title, doc_author, doc_file_sha256),
+      location     = doc_location,
     })
     if not ok then
       err_msg = tostring(analysis)
@@ -186,6 +210,7 @@ local function make_analyze_task(content, focus_points, language,
         language         = language,
         title            = doc_title,
         author           = doc_author,
+        file_sha256      = doc_file_sha256,
       }
     end
     local out = result_text
@@ -198,8 +223,8 @@ end
 -- ── 公开 API ──────────────────────────────────────────────────────────────────
 
 -- 提交摘要后台任务
--- doc_title / doc_author 由调用方（Workflow）从 ui 中提取后传入
-function BackgroundJobs.submit_summary(ui, options, default_highlighted, doc_title, doc_author)
+-- doc_title / doc_author / doc_file_sha256 由调用方（Workflow）从 ui 中提取后传入
+function BackgroundJobs.submit_summary(ui, options, default_highlighted, doc_title, doc_author, doc_file_sha256, doc_location)
   local content = Util.trim(
     options.content or options.highlighted_text or default_highlighted or ""
   )
@@ -213,8 +238,8 @@ function BackgroundJobs.submit_summary(ui, options, default_highlighted, doc_tit
   local viewer_title = options.viewer_title or _("Reader AI Summary")
   local hitext       = options.highlighted_text or content
 
-  local job  = new_job("summarize", viewer_title, hitext, doc_title, doc_author)
-  local task = make_summarize_task(content, prompt, language, hitext, doc_title, doc_author)
+  local job  = new_job("summarize", viewer_title, hitext, doc_title, doc_author, doc_file_sha256)
+  local task = make_summarize_task(content, prompt, language, hitext, doc_title, doc_author, doc_file_sha256, doc_location)
 
   local pid, read_fd = ffiutil.runInSubProcess(task, true)
   if not pid then
@@ -233,7 +258,7 @@ function BackgroundJobs.submit_summary(ui, options, default_highlighted, doc_tit
 end
 
 -- 提交分析后台任务
-function BackgroundJobs.submit_analyze(ui, options, default_highlighted, doc_title, doc_author)
+function BackgroundJobs.submit_analyze(ui, options, default_highlighted, doc_title, doc_author, doc_file_sha256, doc_location)
   local content = Util.trim(
     options.content or options.highlighted_text or default_highlighted or ""
   )
@@ -249,8 +274,8 @@ function BackgroundJobs.submit_analyze(ui, options, default_highlighted, doc_tit
   local viewer_title = options.viewer_title or _("Reader AI Analysis")
   local hitext       = options.highlighted_text or content
 
-  local job  = new_job("analyze", viewer_title, hitext, doc_title, doc_author)
-  local task = make_analyze_task(content, focus_points, language, hitext, doc_title, doc_author)
+  local job  = new_job("analyze", viewer_title, hitext, doc_title, doc_author, doc_file_sha256)
+  local task = make_analyze_task(content, focus_points, language, hitext, doc_title, doc_author, doc_file_sha256, doc_location)
 
   local pid, read_fd = ffiutil.runInSubProcess(task, true)
   if not pid then

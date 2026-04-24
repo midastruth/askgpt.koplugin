@@ -11,6 +11,8 @@ local Formatter        = require("askgpt.formatter")
 local Util             = require("askgpt.util")
 local BackgroundJobs   = require("askgpt.background_jobs")
 
+local unpack = unpack or table.unpack
+
 local Workflow = {}
 
 -- ── 私有工具 ─────────────────────────────────────────────────────────────────
@@ -21,19 +23,116 @@ local function show_loading()
   return loading
 end
 
-local function get_doc_props(ui)
-  local props = ui.document and ui.document:getProps() or {}
-  return props.title or nil, props.authors or nil
+local function read_doc_setting(ui, key)
+  if not ui or not ui.doc_settings or not ui.doc_settings.readSetting then return nil end
+  local ok, value = pcall(function() return ui.doc_settings:readSetting(key) end)
+  if ok then return value end
+  return nil
 end
 
-local function build_lookup_context(ui, highlighted_text, extra_context)
-  local props  = ui.document and ui.document:getProps() or {}
+local function save_doc_setting(ui, key, value)
+  if value == nil or not ui or not ui.doc_settings or not ui.doc_settings.saveSetting then return end
+  pcall(function() ui.doc_settings:saveSetting(key, value) end)
+end
+
+local function number_equals(a, b)
+  if a == b then return true end
+  return tonumber(a) ~= nil and tonumber(a) == tonumber(b)
+end
+
+local function get_doc_file_sha256(ui)
+  local filepath = ui and ui.document and ui.document.file
+  if not filepath or filepath == "" then return nil end
+
+  local size, mtime = Util.file_stat(filepath)
+  local cached = read_doc_setting(ui, "file_sha256")
+  if type(cached) == "string" and cached ~= "" then
+    local cached_path  = read_doc_setting(ui, "file_sha256_path")
+    local cached_size  = read_doc_setting(ui, "file_sha256_size")
+    local cached_mtime = read_doc_setting(ui, "file_sha256_mtime")
+    local same_path  = cached_path == nil or cached_path == filepath
+    local same_size  = size == nil or cached_size == nil or number_equals(cached_size, size)
+    local same_mtime = mtime == nil or cached_mtime == nil or number_equals(cached_mtime, mtime)
+    if same_path and same_size and same_mtime then
+      return cached
+    end
+  end
+
+  local digest = Util.sha256_file(filepath)
+  if digest then
+    save_doc_setting(ui, "file_sha256", digest)
+    save_doc_setting(ui, "file_sha256_path", filepath)
+    save_doc_setting(ui, "file_sha256_size", size)
+    save_doc_setting(ui, "file_sha256_mtime", mtime)
+  end
+  return digest
+end
+
+local function get_doc_props(ui)
+  local props = ui and ui.document and ui.document:getProps() or {}
+  local file_sha256 = type(props.file_sha256) == "string" and props.file_sha256 ~= ""
+                      and props.file_sha256 or get_doc_file_sha256(ui)
+  return props.title or nil, props.authors or nil, file_sha256
+end
+
+local function build_book(title, author, file_sha256)
+  local book = {
+    sha256 = file_sha256,
+    title  = title,
+    author = author,
+  }
+  for _, value in pairs(book) do
+    if value ~= nil and value ~= "" then return book end
+  end
+  return nil
+end
+
+local function safe_call(obj, method, ...)
+  if not obj or type(obj[method]) ~= "function" then return nil end
+  local args = { ... }
+  local ok, value = pcall(function() return obj[method](obj, unpack(args)) end)
+  if ok then return value end
+  return nil
+end
+
+local function get_current_page(ui)
+  return safe_call(ui, "getCurrentPage")
+      or (ui and ui.view and ui.view.state and ui.view.state.page)
+      or (ui and ui.toc and ui.toc.pageno)
+end
+
+local function get_doc_location(ui)
+  local current_page = get_current_page(ui)
+  local chapter = safe_call(ui and ui.toc, "getTocTitleOfCurrentPage")
+  if (not chapter or chapter == "") and current_page then
+    chapter = safe_call(ui and ui.toc, "getTocTitleByPage", current_page)
+  end
+  if chapter == "" then chapter = nil end
+
+  local progress
+  local page_count = safe_call(ui and ui.document, "getPageCount")
+  if type(current_page) == "number" and type(page_count) == "number" and page_count > 0 then
+    progress = current_page / page_count
+  end
+
+  if chapter or progress then
+    return { chapter = chapter, progress = progress }
+  end
+  return nil
+end
+
+local function build_lookup_context(ui, highlighted_text, extra_context, file_sha256)
+  local props  = ui and ui.document and ui.document:getProps() or {}
   local title  = props.title   or _("Unknown Title")
   local author = props.authors or _("Unknown Author")
+  file_sha256 = file_sha256 or get_doc_file_sha256(ui)
   local parts  = {
     _("Document title: ") .. title,
     _("Author: ") .. author,
   }
+  if file_sha256 and file_sha256 ~= "" then
+    table.insert(parts, _("File SHA256: ") .. file_sha256)
+  end
   if highlighted_text and highlighted_text ~= "" then
     table.insert(parts, _("Highlighted text: ") .. highlighted_text)
   end
@@ -102,7 +201,7 @@ end
 
 -- ── Lookup (字典) ─────────────────────────────────────────────────────────────
 
--- options: term, highlighted_text, question, language, request_language,
+-- options: term, highlighted_text, question, action, language, request_language,
 --          context, skip_context_question, viewer_title,
 --          followup_language, followup_request_language
 function Workflow.lookup(ui, options, default_highlighted)
@@ -117,7 +216,10 @@ function Workflow.lookup(ui, options, default_highlighted)
                             and Util.trim(options.context) or ""
   local skip_ctx_question = options.skip_context_question
   local request_language  = options.request_language or options.language
-  local doc_title, doc_author = get_doc_props(ui)
+  local action            = options.action or "ask"
+  local doc_title, doc_author, doc_file_sha256 = get_doc_props(ui)
+  local doc_book          = build_book(doc_title, doc_author, doc_file_sha256)
+  local doc_location      = get_doc_location(ui)
 
   local function compose_context(prompt_text)
     local trimmed = Util.trim(prompt_text)
@@ -127,7 +229,7 @@ function Workflow.lookup(ui, options, default_highlighted)
       end
       return base_context
     end
-    return build_lookup_context(ui, options.highlighted_text or default_highlighted, trimmed)
+    return build_lookup_context(ui, options.highlighted_text or default_highlighted, trimmed, doc_file_sha256)
   end
 
   run_viewer_workflow({
@@ -136,9 +238,14 @@ function Workflow.lookup(ui, options, default_highlighted)
 
     call_ai = function()
       local ok, dictionary = pcall(AiClient.dictionaryLookup, {
-        term     = request_term,
-        language = request_language,
-        context  = compose_context(question),
+        action      = action,
+        term        = request_term,
+        language    = request_language,
+        question    = question,
+        context     = compose_context(question),
+        file_sha256 = doc_file_sha256,
+        book        = doc_book,
+        location    = doc_location,
       })
       if not ok then
         Errors.show_request_error(dictionary, _("字典查询"))
@@ -156,6 +263,7 @@ function Workflow.lookup(ui, options, default_highlighted)
         language         = options.language,
         title            = doc_title,
         author           = doc_author,
+        file_sha256      = doc_file_sha256,
       }
     end,
 
@@ -164,9 +272,14 @@ function Workflow.lookup(ui, options, default_highlighted)
       local follow_req_lang = options.followup_request_language
                               or options.request_language or follow_lang
       local ok2, dict_follow = pcall(AiClient.dictionaryLookup, {
-        term     = input,
-        language = follow_req_lang,
-        context  = compose_context(input),
+        action      = action,
+        term        = input,
+        language    = follow_req_lang,
+        question    = input,
+        context     = compose_context(input),
+        file_sha256 = doc_file_sha256,
+        book        = doc_book,
+        location    = doc_location,
       })
       if not ok2 then
         Errors.show_request_error(dict_follow, _("字典查询"))
@@ -176,9 +289,10 @@ function Workflow.lookup(ui, options, default_highlighted)
         question   = input,
         term       = input,
         dictionary = dict_follow,
-        language   = follow_lang,
-        title      = doc_title,
-        author     = doc_author,
+        language    = follow_lang,
+        title       = doc_title,
+        author      = doc_author,
+        file_sha256 = doc_file_sha256,
       }
     end,
   })
@@ -189,8 +303,9 @@ end
 -- 提交摘要到后台子进程；立即返回，不阻塞 UI
 -- options: content, highlighted_text, prompt, language, viewer_title
 function Workflow.summarize(ui, options, default_highlighted)
-  local doc_title, doc_author = get_doc_props(ui)
-  BackgroundJobs.submit_summary(ui, options, default_highlighted, doc_title, doc_author)
+  local doc_title, doc_author, doc_file_sha256 = get_doc_props(ui)
+  BackgroundJobs.submit_summary(ui, options, default_highlighted, doc_title, doc_author,
+                                doc_file_sha256, get_doc_location(ui))
 end
 
 -- ── Analyze → 后台执行 ────────────────────────────────────────────────────────
@@ -198,8 +313,9 @@ end
 -- 提交分析到后台子进程；立即返回，不阻塞 UI
 -- options: content, highlighted_text, focus_points_input, language, viewer_title
 function Workflow.analyze(ui, options, default_highlighted)
-  local doc_title, doc_author = get_doc_props(ui)
-  BackgroundJobs.submit_analyze(ui, options, default_highlighted, doc_title, doc_author)
+  local doc_title, doc_author, doc_file_sha256 = get_doc_props(ui)
+  BackgroundJobs.submit_analyze(ui, options, default_highlighted, doc_title, doc_author,
+                                doc_file_sha256, get_doc_location(ui))
 end
 
 return Workflow

@@ -13,9 +13,7 @@ local REQUEST_TIMEOUT    = 10   -- 秒
 local MAX_RETRY_ATTEMPTS = 3
 local RETRY_DELAY        = 2    -- 秒
 
-local DEFAULT_DICTIONARY_PATH = "/ai/dictionary"
-local DEFAULT_SUMMARIZE_PATH  = "/ai/summarize"
-local DEFAULT_ANALYZE_PATH    = "/ai/analyze"
+local DEFAULT_READ_PATH = "/ai/query"
 
 local AiClient = {}
 AiClient.MAX_RETRY_ATTEMPTS = MAX_RETRY_ATTEMPTS  -- 供外部错误提示引用
@@ -90,43 +88,58 @@ local function normalize_path(path)
   return path
 end
 
-local function resolve_endpoint(path_keys, default_path, terminal_patterns)
+local function resolve_read_endpoint()
   local base = resolve_base_url()
-  local path = default_path
-  for _, key in ipairs(path_keys) do
-    local value = pick_config_path(key)
-    if value then path = value; break end
+  local path = normalize_path(
+    pick_config_path("reader_ai_query_path")
+    or pick_config_path("reader_ai_read_path") -- backward-compatible config key
+    or DEFAULT_READ_PATH
+  )
+
+  if base:match("/ai/query$") or base:match("/query$")
+      or base:match("/ai/read$") or base:match("/read$") then
+    return base
   end
-  path = normalize_path(path)
-  if terminal_patterns then
-    for _, pattern in ipairs(terminal_patterns) do
-      if base:match(pattern) then return base end
-    end
+  if base:match("/ai$") then
+    if path == DEFAULT_READ_PATH then return base .. "/query" end
+    if path:match("^/ai/") then return base .. path:sub(4) end
   end
   return base .. path
 end
 
-local ENDPOINTS = {
-  dictionary = {
-    path_keys         = { "reader_ai_dictionary_path", "reader_ai_generate_path", "generate_endpoint" },
-    default_path      = DEFAULT_DICTIONARY_PATH,
-    terminal_patterns = { "/ai/[^/]*$", "/ai$", "/dictionary$" },
-  },
-  summarize = {
-    path_keys         = { "reader_ai_summarize_path", "reader_ai_summary_path" },
-    default_path      = DEFAULT_SUMMARIZE_PATH,
-    terminal_patterns = { "/ai/[^/]*$", "/ai$", "/summarize$" },
-  },
-  analyze = {
-    path_keys         = { "reader_ai_analyze_path", "reader_ai_analysis_path" },
-    default_path      = DEFAULT_ANALYZE_PATH,
-    terminal_patterns = { "/ai/[^/]*$", "/ai$", "/analyze$" },
-  },
-}
+local function has_values(t)
+  if type(t) ~= "table" then return false end
+  for _, value in pairs(t) do
+    if value ~= nil and value ~= "" then return true end
+  end
+  return false
+end
 
-local function resolve_language(request_language)
-  if request_language and request_language ~= "" then return request_language end
-  return Config.get_language()
+local function build_book(params)
+  if type(params.book) == "table" and has_values(params.book) then
+    return params.book
+  end
+  local book = {
+    sha256 = params.file_sha256,
+    title  = params.title,
+    author = params.author,
+  }
+  return has_values(book) and book or nil
+end
+
+local function build_location(params)
+  if type(params.location) == "table" and has_values(params.location) then
+    return params.location
+  end
+  return nil
+end
+
+local function add_read_metadata(payload, params)
+  if params.question and params.question ~= "" then payload.question = params.question end
+  local book = build_book(params)
+  if book then payload.book = book end
+  local location = build_location(params)
+  if location then payload.location = location end
 end
 
 -- ── HTTP 请求 ─────────────────────────────────────────────────────────────
@@ -248,13 +261,12 @@ function AiClient.dictionaryLookup(params)
   local term = Util.trim(params.term)
   if not term or term == "" then error("Reader AI dictionary query requires a term.") end
 
-  local ep = resolve_endpoint(
-    ENDPOINTS.dictionary.path_keys,
-    ENDPOINTS.dictionary.default_path,
-    ENDPOINTS.dictionary.terminal_patterns
-  )
-  local payload = { term = term, language = resolve_language(params.language) }
-  if params.context and params.context ~= "" then payload.context = params.context end
+  local ep = resolve_read_endpoint()
+  local payload = {
+    action = params.action or "ask",
+    text   = term,
+  }
+  add_read_metadata(payload, params)
 
   local decoded = perform_json_post(ep, payload, "Reader AI dictionary")
   if type(decoded) ~= "table" then
@@ -275,14 +287,15 @@ function AiClient.summarizeContent(params)
   local content = Util.trim(params.content or params.text or params.highlight)
   if not content or content == "" then error("Reader AI summarize requires content text.") end
 
-  local ep = resolve_endpoint(
-    ENDPOINTS.summarize.path_keys,
-    ENDPOINTS.summarize.default_path,
-    ENDPOINTS.summarize.terminal_patterns
-  )
-  local payload = { content = content }
-  if params.language and params.language ~= "" then payload.language = params.language end
-  if params.context  and params.context  ~= "" then payload.context  = params.context  end
+  local ep = resolve_read_endpoint()
+  local payload = {
+    action = "summarize",
+    text   = content,
+  }
+  if params.context and params.context ~= "" and not params.question then
+    payload.question = params.context
+  end
+  add_read_metadata(payload, params)
 
   local decoded = perform_json_post(ep, payload, "Reader AI summarize")
   local summary
@@ -307,15 +320,16 @@ function AiClient.analyzeContent(params)
   local content = Util.trim(params.content)
   if not content or content == "" then error("Reader AI analyze requires content text.") end
 
-  local ep = resolve_endpoint(
-    ENDPOINTS.analyze.path_keys,
-    ENDPOINTS.analyze.default_path,
-    ENDPOINTS.analyze.terminal_patterns
-  )
-  local payload = { content = content }
-  if params.focus_points and type(params.focus_points) == "table" then
-    payload.focus_points = params.focus_points
+  local ep = resolve_read_endpoint()
+  local payload = {
+    action = "analyze",
+    text   = content,
+  }
+  if type(params.focus_points) == "table" and #params.focus_points > 0
+      and not params.question then
+    payload.question = table.concat(params.focus_points, ", ")
   end
+  add_read_metadata(payload, params)
 
   local decoded = perform_json_post(ep, payload, "Reader AI analyze")
   if type(decoded) ~= "table" then

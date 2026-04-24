@@ -32,8 +32,12 @@ package.loaded["chatgptviewer"] = {
   end,
 }
 
+local formatter_calls = {}
 package.loaded["askgpt.formatter"] = {
-  dictionary = function(args) return "dict:" .. (args.term or "?") end,
+  dictionary = function(args)
+    table.insert(formatter_calls, args)
+    return "dict:" .. (args.term or "?")
+  end,
   summary    = function(args) return "sum" end,
   analysis   = function(args) return "ana" end,
 }
@@ -52,8 +56,22 @@ local Workflow = require("askgpt.workflow")
 
 -- Shared fake UI
 local fake_ui = {
+  getCurrentPage = function() return 12 end,
   document = {
+    file = "/tmp/test-book.epub",
     getProps = function() return { title = "Test Book", authors = "Test Author" } end,
+    getPageCount = function() return 100 end,
+  },
+  doc_settings = {
+    readSetting = function(_, key)
+      if key == "file_sha256" then return "abc123" end
+      if key == "file_sha256_path" then return "/tmp/test-book.epub" end
+      return nil
+    end,
+    saveSetting = function() end,
+  },
+  toc = {
+    getTocTitleOfCurrentPage = function() return "Chapter 1" end,
   },
   highlight = {
     addNote  = function() end,
@@ -85,6 +103,7 @@ H.eq("analyze() kind is 'analyze'", bj_calls[1] and bj_calls[1].kind, "analyze")
 
 bj_calls = {}
 ai_calls = {}
+formatter_calls = {}
 spy.shown = {}
 
 H.no_error("lookup() runs without error", function()
@@ -96,6 +115,13 @@ end)
 
 H.eq("lookup() does NOT call BackgroundJobs", #bj_calls, 0)
 H.eq("lookup() calls AiClient.dictionaryLookup", #ai_calls, 1)
+H.eq("lookup() passes unified read action to AiClient", ai_calls[1] and ai_calls[1].action, "ask")
+H.eq("lookup() passes question to AiClient", ai_calls[1] and ai_calls[1].question, "")
+H.eq("lookup() passes book.sha256 to AiClient", ai_calls[1] and ai_calls[1].book and ai_calls[1].book.sha256, "abc123")
+H.eq("lookup() passes book.title to AiClient", ai_calls[1] and ai_calls[1].book and ai_calls[1].book.title, "Test Book")
+H.eq("lookup() passes location.chapter to AiClient", ai_calls[1] and ai_calls[1].location and ai_calls[1].location.chapter, "Chapter 1")
+H.eq("lookup() passes location.progress to AiClient", ai_calls[1] and ai_calls[1].location and ai_calls[1].location.progress, 0.12)
+H.eq("lookup() passes file_sha256 to formatter", formatter_calls[1] and formatter_calls[1].file_sha256, "abc123")
 
 -- Viewer should have been shown
 local viewer_shown = false
