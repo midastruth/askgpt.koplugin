@@ -14,6 +14,8 @@ local MAX_RETRY_ATTEMPTS = 3
 local RETRY_DELAY        = 2    -- 秒
 
 local DEFAULT_READ_PATH = "/ai/query"
+local DEFAULT_IMPORT_EPUB_PATH = "/books/import/epub"
+local DEFAULT_BOOKS_PATH = "/books"
 
 local AiClient = {}
 AiClient.MAX_RETRY_ATTEMPTS = MAX_RETRY_ATTEMPTS  -- 供外部错误提示引用
@@ -105,6 +107,35 @@ local function resolve_read_endpoint()
     if path:match("^/ai/") then return base .. path:sub(4) end
   end
   return base .. path
+end
+
+local function resolve_service_base_url()
+  local base = resolve_base_url()
+  base = base:gsub("/ai/query$", "")
+             :gsub("/ai/read$", "")
+             :gsub("/query$", "")
+             :gsub("/read$", "")
+             :gsub("/ai$", "")
+  return base
+end
+
+local function resolve_import_epub_endpoint()
+  local path = normalize_path(
+    pick_config_path("reader_ai_import_epub_path") or DEFAULT_IMPORT_EPUB_PATH
+  )
+  return resolve_service_base_url() .. path
+end
+
+local function url_encode(value)
+  return tostring(value or ""):gsub("([^%w%-%._~])", function(char)
+    return string.format("%%%02X", string.byte(char))
+  end)
+end
+
+local function resolve_book_lookup_endpoint(sha256)
+  local path = normalize_path(pick_config_path("reader_ai_books_path") or DEFAULT_BOOKS_PATH)
+  if path:sub(-1) == "/" then path = path:sub(1, -2) end
+  return resolve_service_base_url() .. path .. "/" .. url_encode(sha256)
 end
 
 local function has_values(t)
@@ -334,6 +365,66 @@ function AiClient.analyzeContent(params)
   local decoded = perform_json_post(ep, payload, "Reader AI analyze")
   if type(decoded) ~= "table" then
     error("Reader AI analyze response did not contain a JSON object.")
+  end
+  return decoded
+end
+
+function AiClient.getBook(sha256)
+  sha256 = Util.trim(sha256 or "")
+  if sha256 == "" then error("Book-Aware book lookup requires sha256.") end
+
+  local endpoint = resolve_book_lookup_endpoint(sha256)
+  local success, status_code, response_chunks = http_request_with_retry({
+    url     = endpoint,
+    method  = "GET",
+    headers = { ["Accept"] = "application/json" },
+  })
+
+  if not success then
+    if tonumber(status_code) == 404 then return nil end
+    if status_code then
+      local friendly = extract_error_detail(response_chunks) or tostring(response_chunks or "")
+      error(string.format(
+        "Book-Aware book lookup returned HTTP %s: %s",
+        tostring(status_code), friendly ~= "" and friendly or "unknown error"
+      ))
+    end
+    error(string.format(
+      "Failed to contact Book-Aware book lookup after %d attempts. Last error: %s",
+      MAX_RETRY_ATTEMPTS, tostring(response_chunks)
+    ))
+  end
+
+  if type(response_chunks) ~= "table" then
+    error("Book-Aware book lookup returned an invalid response buffer.")
+  end
+  local response_body = table.concat(response_chunks)
+  local ok, decoded = pcall(json.decode, response_body)
+  if not ok then
+    error("Failed to decode Book-Aware book lookup response: " .. response_body)
+  end
+  return decoded
+end
+
+function AiClient.importEpub(params)
+  if type(params) ~= "table" then
+    error("Book-Aware EPUB import expects a parameter table.")
+  end
+  if type(params.content_base64) ~= "string" or params.content_base64 == "" then
+    error("Book-Aware EPUB import requires content_base64.")
+  end
+
+  local payload = {
+    filename       = params.filename or "book.epub",
+    content_base64 = params.content_base64,
+    book           = params.book or {},
+  }
+  if params.markdown and params.markdown ~= "" then payload.markdown = params.markdown end
+  if params.markdown_path and params.markdown_path ~= "" then payload.markdown_path = params.markdown_path end
+
+  local decoded = perform_json_post(resolve_import_epub_endpoint(), payload, "Book-Aware EPUB import")
+  if type(decoded) ~= "table" then
+    error("Book-Aware EPUB import response did not contain a JSON object.")
   end
   return decoded
 end

@@ -31,6 +31,51 @@ function Util.file_stat(filepath)
   return size, nil
 end
 
+local BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+local function fallback_base64(data)
+  local out = {}
+  local index = 1
+  for i = 1, #data, 3 do
+    local a = data:byte(i)
+    local b = data:byte(i + 1)
+    local c = data:byte(i + 2)
+    local triple = a * 65536 + (b or 0) * 256 + (c or 0)
+    local n1 = math.floor(triple / 262144) % 64 + 1
+    local n2 = math.floor(triple / 4096) % 64 + 1
+    local n3 = math.floor(triple / 64) % 64 + 1
+    local n4 = triple % 64 + 1
+    out[index] = BASE64_ALPHABET:sub(n1, n1)
+    out[index + 1] = BASE64_ALPHABET:sub(n2, n2)
+    out[index + 2] = b and BASE64_ALPHABET:sub(n3, n3) or "="
+    out[index + 3] = c and BASE64_ALPHABET:sub(n4, n4) or "="
+    index = index + 4
+  end
+  return table.concat(out)
+end
+
+function Util.base64_file(filepath)
+  if not filepath or filepath == "" then
+    return nil, "missing file path"
+  end
+
+  local file, open_err = io.open(filepath, "rb")
+  if not file then
+    return nil, open_err or "cannot open file"
+  end
+  local data = file:read("*all") or ""
+  file:close()
+
+  local ok_mime, mime = pcall(require, "mime")
+  if ok_mime and mime and type(mime.b64) == "function" then
+    local ok_b64, encoded = pcall(mime.b64, data)
+    if ok_b64 and type(encoded) == "string" and encoded ~= "" then
+      return encoded
+    end
+  end
+  return fallback_base64(data)
+end
+
 function Util.sha256_file(filepath)
   if not filepath or filepath == "" then
     return nil, "missing file path"

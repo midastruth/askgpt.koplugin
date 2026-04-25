@@ -6,7 +6,7 @@ local spy = H.mock_koreader()
 
 -- Provide stub modules that main.lua requires
 H.reset("main", "askgpt.config", "askgpt.dialog_controller",
-        "askgpt.background_jobs", "update_checker")
+        "askgpt.background_jobs", "askgpt.book_upload", "update_checker")
 
 package.loaded["askgpt.config"] = {
   validate = function() return true, {} end,
@@ -18,6 +18,7 @@ package.loaded["askgpt.background_jobs"]   = {
   submit_analyze    = function() end,
   show_results_menu = function() end,
 }
+package.loaded["askgpt.book_upload"] = { upload_current = function() end }
 -- update_checker already set by mock_koreader
 
 local AskGPT = require("main")
@@ -71,6 +72,10 @@ H.no_error("addToMainMenu() runs without error", function()
   AskGPT.addToMainMenu(fake_self, menu_items)
 end)
 
+H.is_true("addToMainMenu creates askgpt_upload_book key",
+          menu_items.askgpt_upload_book ~= nil)
+H.is_true("askgpt_upload_book.callback is a function",
+          type(menu_items.askgpt_upload_book and menu_items.askgpt_upload_book.callback) == "function")
 H.is_true("addToMainMenu creates askgpt_results key",
           menu_items.askgpt_results ~= nil)
 H.is_true("askgpt_results.text is a string",

@@ -8,6 +8,7 @@ local _ = require("gettext")
 local Config           = require("askgpt.config")
 local DialogController = require("askgpt.dialog_controller")
 local BackgroundJobs   = require("askgpt.background_jobs")
+local BookUpload       = require("askgpt.book_upload")
 local UpdateChecker    = require("update_checker")
 
 local AskGPT = InputContainer:new {
@@ -16,6 +17,13 @@ local AskGPT = InputContainer:new {
 }
 
 local updateMessageShown = false
+
+local function autoUploadEnabled()
+  local cfg = Config.get()
+  return type(cfg) == "table"
+      and (cfg.reader_ai_auto_upload_book == true
+           or cfg.book_aware_auto_upload == true)
+end
 
 local function checkNetworkAndConfig()
   local config_valid, config_result = Config.validate()
@@ -64,10 +72,29 @@ function AskGPT:init()
       end,
     }
   end)
+
+  if autoUploadEnabled() then
+    UIManager:scheduleIn(1, function()
+      if not checkNetworkAndConfig() then return end
+      NetworkMgr:runWhenOnline(function()
+        BookUpload.upload_current(self.ui)
+      end)
+    end)
+  end
 end
 
 -- "稍后查看"入口：在 Reader 主菜单注册 AskGPT Results 条目
 function AskGPT:addToMainMenu(menu_items)
+  menu_items.askgpt_upload_book = {
+    text = _("Upload current book to Book-Aware"),
+    callback = function()
+      if not checkNetworkAndConfig() then return end
+      NetworkMgr:runWhenOnline(function()
+        BookUpload.upload_current(self.ui)
+      end)
+    end,
+  }
+
   menu_items.askgpt_results = {
     text = _("AskGPT Recent Results"),
     callback = function()
