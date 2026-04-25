@@ -199,7 +199,11 @@ local function http_request_with_retry(request_params)
     http.TIMEOUT  = prev_http_timeout
     https.TIMEOUT = prev_https_timeout
 
-    local status_code = tonumber(code) or code
+    -- LuaSocket/LuaSec may return transport errors such as "timeout",
+    -- "wantread", or "wantwrite" in the second return value.  These are
+    -- not HTTP status codes and must be treated as retryable connection
+    -- failures instead of being reported as "HTTP wantread".
+    local status_code = tonumber(code)
     if success and res and status_code == 200 then
       return true, status_code, response_chunks
     end
@@ -224,7 +228,12 @@ local function http_request_with_retry(request_params)
     elseif not success then
       last_error = "Request failed: " .. tostring(res)
     elseif not res then
-      last_error = "Connection failed"
+      local transport_error = code or status_line
+      if transport_error ~= nil and tostring(transport_error) ~= "" then
+        last_error = "Connection failed: " .. tostring(transport_error)
+      else
+        last_error = "Connection failed"
+      end
     else
       last_error = "HTTP error: " .. tostring(code)
     end
