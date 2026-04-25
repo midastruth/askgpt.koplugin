@@ -76,6 +76,12 @@ H.is_true("addToMainMenu creates askgpt_upload_book key",
           menu_items.askgpt_upload_book ~= nil)
 H.is_true("askgpt_upload_book.callback is a function",
           type(menu_items.askgpt_upload_book and menu_items.askgpt_upload_book.callback) == "function")
+H.is_true("addToMainMenu creates askgpt_update key",
+          menu_items.askgpt_update ~= nil)
+H.is_true("askgpt_update.text is a string",
+          type(menu_items.askgpt_update and menu_items.askgpt_update.text) == "string")
+H.is_true("askgpt_update.callback is a function",
+          type(menu_items.askgpt_update and menu_items.askgpt_update.callback) == "function")
 H.is_true("addToMainMenu creates askgpt_results key",
           menu_items.askgpt_results ~= nil)
 H.is_true("askgpt_results.text is a string",

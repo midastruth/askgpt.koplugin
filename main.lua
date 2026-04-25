@@ -95,6 +95,22 @@ function AskGPT:addToMainMenu(menu_items)
     end,
   }
 
+  menu_items.askgpt_update = {
+    text = _("检查 AskGPT 更新"),
+    callback = function()
+      if not NetworkMgr:isOnline() then
+        UIManager:show(InfoMessage:new {
+          text    = _("网络未连接，请检查网络设置后重试。"),
+          timeout = 3,
+        })
+        return
+      end
+      NetworkMgr:runWhenOnline(function()
+        UpdateChecker.checkAndPromptInstall()
+      end)
+    end,
+  }
+
   menu_items.askgpt_results = {
     text = _("AskGPT Recent Results"),
     callback = function()
