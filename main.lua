@@ -13,7 +13,7 @@ local UpdateChecker    = require("update_checker")
 
 local AskGPT = InputContainer:new {
   name        = "askgpt",
-  is_doc_only = true,
+  is_doc_only = false,
 }
 
 local updateMessageShown = false
@@ -45,8 +45,29 @@ local function checkNetworkAndConfig()
 end
 
 function AskGPT:init()
-  -- 注册主菜单条目（AskGPT Recent Results），必须在 init 里调用
   self.ui.menu:registerToMainMenu(self)
+
+  -- 文件管理器：长按书籍文件弹出"上传到 Book-Aware"按钮
+  if self.ui.file_chooser then
+    self.ui:addFileDialogButtons("askgpt_upload_file", function(file, is_file)
+      if not is_file then return end
+      local ext = tostring(file or ""):lower():match("%.([^.]+)$")
+      if ext ~= "epub" then return end
+      return {
+        {
+          text = _("Upload to Book-Aware"),
+          callback = function()
+            if not checkNetworkAndConfig() then return end
+            local NetworkMgr = require("ui/network/manager")
+            NetworkMgr:runWhenOnline(function()
+              BookUpload.upload_file(file)
+            end)
+          end,
+        },
+      }
+    end)
+    return
+  end
 
   self.ui.highlight:addToHighlightDialog("askgpt_GPT", function(_reader_highlight_instance)
     return {

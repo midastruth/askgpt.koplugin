@@ -18,7 +18,10 @@ package.loaded["askgpt.background_jobs"]   = {
   submit_analyze    = function() end,
   show_results_menu = function() end,
 }
-package.loaded["askgpt.book_upload"] = { upload_current = function() end }
+package.loaded["askgpt.book_upload"] = {
+  upload_current = function() end,
+  upload_file    = function() end,
+}
 -- update_checker already set by mock_koreader
 
 local AskGPT = require("main")
@@ -64,6 +67,51 @@ if factory then
 else
   H.is_false("factory_fn was registered", true)  -- force fail
 end
+
+-- ── Test init() in FileManager context ────────────────────────────────────
+
+local fm_reg_calls       = {}
+local fm_dialog_calls    = {}  -- addFileDialogButtons call log
+
+local fake_fm_self = {
+  ui = {
+    file_chooser = {},  -- presence signals FileManager context
+    menu = {
+      registerToMainMenu = function(_, obj)
+        table.insert(fm_reg_calls, obj)
+      end,
+    },
+    addFileDialogButtons = function(_, row_id, row_func)
+      table.insert(fm_dialog_calls, { id = row_id, fn = row_func })
+    end,
+  },
+}
+
+H.reset("main")
+AskGPT = require("main")
+
+H.no_error("init() in FileManager context runs without error", function()
+  AskGPT.init(fake_fm_self)
+end)
+
+H.eq("FileManager init() calls registerToMainMenu once", #fm_reg_calls, 1)
+H.eq("FileManager init() registers one file dialog button row", #fm_dialog_calls, 1)
+H.eq("file dialog row_id is 'askgpt_upload_file'",
+     fm_dialog_calls[1] and fm_dialog_calls[1].id, "askgpt_upload_file")
+
+local row_fn = fm_dialog_calls[1] and fm_dialog_calls[1].fn
+-- non-file: should return nil (no button)
+H.is_true("row_fn returns nil for non-file",
+          row_fn and row_fn("/books/folder", false) == nil)
+-- non-epub file: should return nil
+H.is_true("row_fn returns nil for non-epub file",
+          row_fn and row_fn("/books/book.pdf", true) == nil)
+-- epub file: should return a table with one button
+local buttons = row_fn and row_fn("/books/book.epub", true)
+H.is_true("row_fn returns table for epub",  type(buttons) == "table")
+H.is_true("button row has one entry",       buttons and #buttons == 1)
+H.is_true("button has .text",               buttons and type(buttons[1].text) == "string")
+H.is_true("button has .callback",           buttons and type(buttons[1].callback) == "function")
 
 -- ── Test addToMainMenu() ───────────────────────────────────────────────────
 

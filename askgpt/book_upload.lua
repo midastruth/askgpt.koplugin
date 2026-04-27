@@ -76,6 +76,64 @@ local function get_book_metadata(ui, filepath)
   }
 end
 
+function BookUpload.upload_file(filepath)
+  if type(filepath) ~= "string" or filepath == "" then
+    show(_("无法获取书籍文件路径。"), 4)
+    return
+  end
+  if not is_epub(filepath) then
+    show(_("Book-Aware 当前上传接口只支持 EPUB。"), 4)
+    return
+  end
+
+  show(_("正在计算书籍 SHA256..."), 1)
+  local sha = Util.sha256_file(filepath)
+  if type(sha) ~= "string" or sha == "" then
+    show(_("计算书籍 SHA256 失败，无法上传。"), 6)
+    return
+  end
+
+  local book = { sha256 = sha, title = basename(filepath), author = "" }
+
+  show(_("正在检查 Book-Aware 是否已有本书..."), 1)
+  local lookup_ok, existing = pcall(AiClient.getBook, book.sha256)
+  if not lookup_ok then
+    show(_("检查 Book-Aware 书籍状态失败：") .. tostring(existing), 8)
+    return
+  end
+  if type(existing) == "table" and existing.ok then
+    local indexed = existing.indexed and true or false
+    local suffix = indexed
+        and _("\n后端已有索引，可以直接使用 AskGPT。")
+        or _("\n后端已有原始书籍，但尚未索引；需要后端转换/绑定 Markdown。")
+    show(_("Book-Aware 已存在本书，无需重复上传。") .. suffix, indexed and 5 or 8)
+    return
+  end
+
+  show(_("后端没有本书，正在读取并上传 EPUB..."), 1)
+  local encoded, encode_err = Util.base64_file(filepath)
+  if not encoded then
+    show(_("读取/编码 EPUB 失败：") .. tostring(encode_err), 6)
+    return
+  end
+
+  local ok, result = pcall(AiClient.importEpub, {
+    filename       = basename(filepath),
+    content_base64 = encoded,
+    book           = book,
+  })
+  if not ok then
+    show(_("上传到 Book-Aware 失败：") .. tostring(result), 8)
+    return
+  end
+
+  local indexed = type(result) == "table" and type(result.index) == "table"
+  local suffix = indexed
+      and _("\n已生成索引，可以直接使用 AskGPT。")
+      or _("\n已上传原始 EPUB，但后端未返回索引；需要后端转换/绑定 Markdown 后才能整书检索。")
+  show(_("Book-Aware 上传完成。") .. suffix, indexed and 5 or 8)
+end
+
 function BookUpload.upload_current(ui)
   local filepath = ui and ui.document and ui.document.file
   if type(filepath) ~= "string" or filepath == "" then
