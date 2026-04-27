@@ -183,7 +183,8 @@ end
 
 -- ── HTTP 请求 ─────────────────────────────────────────────────────────────
 
-local function http_request_with_retry(request_params)
+local function http_request_with_retry(request_params, timeout)
+  timeout = timeout or REQUEST_TIMEOUT
   local lib = choose_lib(request_params.url)
   local attempts = 0
   local last_error, last_status_code, last_error_text, last_status_line
@@ -193,8 +194,8 @@ local function http_request_with_retry(request_params)
 
     local prev_http_timeout  = http.TIMEOUT
     local prev_https_timeout = https.TIMEOUT
-    http.TIMEOUT  = REQUEST_TIMEOUT
-    https.TIMEOUT = REQUEST_TIMEOUT
+    http.TIMEOUT  = timeout
+    https.TIMEOUT = timeout
 
     local response_chunks = {}
     local req_copy  = Util.clone_table(request_params)
@@ -255,7 +256,7 @@ local function http_request_with_retry(request_params)
   return false, nil, last_error
 end
 
-local function perform_json_post(endpoint, payload, context_label)
+local function perform_json_post(endpoint, payload, context_label, timeout)
   local body = json.encode(payload)
   local success, status_code, response_chunks = http_request_with_retry({
     url     = endpoint,
@@ -266,7 +267,7 @@ local function perform_json_post(endpoint, payload, context_label)
       ["Content-Length"] = tostring(#body),
     },
     source = ltn12.source.string(body),
-  })
+  }, timeout)
 
   if not success then
     if status_code then
@@ -345,7 +346,7 @@ function AiClient.summarizeContent(params)
   end
   add_read_metadata(payload, params)
 
-  local decoded = perform_json_post(ep, payload, "Reader AI summarize")
+  local decoded = perform_json_post(ep, payload, "Reader AI summarize", 90)
   local summary
   if type(decoded) == "table" then
     summary = decoded.summary or decoded.content or decoded.result or decoded.output
@@ -379,7 +380,7 @@ function AiClient.analyzeContent(params)
   end
   add_read_metadata(payload, params)
 
-  local decoded = perform_json_post(ep, payload, "Reader AI analyze")
+  local decoded = perform_json_post(ep, payload, "Reader AI analyze", 90)
   if type(decoded) ~= "table" then
     error("Reader AI analyze response did not contain a JSON object.")
   end

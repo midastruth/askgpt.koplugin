@@ -22,6 +22,7 @@ local specs = {
   "spec.test_main",
   "spec.test_workflow",
   "spec.test_background_jobs",
+  "spec.test_ai_client",
 }
 
 for _, spec in ipairs(specs) do

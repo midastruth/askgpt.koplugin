@@ -19,19 +19,18 @@ with_config("not a table", function(Config)
   H.contains("non-table config: error mentions 'non-table'", msg, "non-table")
 end)
 
--- nil configuration (module not found behaves the same way)
-with_config(nil, function(Config)
-  -- package.loaded["configuration"] = nil means require will try to find the
-  -- file on disk.  Force a load failure by setting it to false (package.loaded
-  -- false = "module not found, don't try again").
-  -- Re-run with explicit false so require returns false → pcall ok=true but
-  -- result is false (not a table).
+-- nil configuration (module not found: require raises an error)
+-- LuaJIT does NOT treat package.loaded[x]=false as "cached absent" — it still
+-- searches the disk.  Use package.preload to inject a failing loader instead.
+do
   H.reset("askgpt.config", "configuration")
-  package.loaded["configuration"] = false   -- signals "not found"
+  package.preload["configuration"] = function() error("configuration not found") end
   local Config2 = require("askgpt.config")
   local ok, msg = Config2.validate()
   H.is_false("nil config: validate() returns false", ok)
-end)
+  package.preload["configuration"] = nil
+  H.reset("askgpt.config", "configuration")
+end
 
 -- Both URLs empty
 with_config({ reader_ai_base_url = "", base_url = "" }, function(Config)

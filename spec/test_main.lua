@@ -136,3 +136,15 @@ H.is_true("askgpt_results.text is a string",
           type(menu_items.askgpt_results and menu_items.askgpt_results.text) == "string")
 H.is_true("askgpt_results.callback is a function",
           type(menu_items.askgpt_results and menu_items.askgpt_results.callback) == "function")
+
+-- In FileManager context, askgpt_upload_book must NOT appear (no open book).
+local fm_menu_items = {}
+H.no_error("addToMainMenu() in FileManager context runs without error", function()
+  AskGPT.addToMainMenu(fake_fm_self, fm_menu_items)
+end)
+H.is_true("FileManager addToMainMenu: no askgpt_upload_book key",
+          fm_menu_items.askgpt_upload_book == nil)
+H.is_true("FileManager addToMainMenu: askgpt_update still present",
+          fm_menu_items.askgpt_update ~= nil)
+H.is_true("FileManager addToMainMenu: askgpt_results still present",
+          fm_menu_items.askgpt_results ~= nil)

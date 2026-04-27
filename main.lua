@@ -106,15 +106,17 @@ end
 
 -- "稍后查看"入口：在 Reader 主菜单注册 AskGPT Results 条目
 function AskGPT:addToMainMenu(menu_items)
-  menu_items.askgpt_upload_book = {
-    text = _("Upload current book to Book-Aware"),
-    callback = function()
-      if not checkNetworkAndConfig() then return end
-      NetworkMgr:runWhenOnline(function()
-        BookUpload.upload_current(self.ui)
-      end)
-    end,
-  }
+  if not self.ui.file_chooser then
+    menu_items.askgpt_upload_book = {
+      text = _("Upload current book to Book-Aware"),
+      callback = function()
+        if not checkNetworkAndConfig() then return end
+        NetworkMgr:runWhenOnline(function()
+          BookUpload.upload_current(self.ui)
+        end)
+      end,
+    }
+  end
 
   menu_items.askgpt_update = {
     text = _("检查 AskGPT 更新"),
