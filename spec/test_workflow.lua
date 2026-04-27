@@ -129,3 +129,75 @@ for _, w in ipairs(spy.shown) do
   if w._type == "ChatGPTViewer" then viewer_shown = true end
 end
 H.is_true("lookup() shows ChatGPTViewer", viewer_shown)
+
+-- ── ask() → SSE 流式 ──────────────────────────────────────────────────────
+
+-- Stub AiClient.streamAsk and ffi/util for ask() tests
+local stream_ask_calls = {}
+package.loaded["askgpt.ai_client"].streamAsk = function(params, tmpfile)
+  table.insert(stream_ask_calls, { params = params, tmpfile = tmpfile })
+end
+package.loaded["askgpt.formatter"].ask = function(args)
+  return "ask:" .. (args.question or "?")
+end
+package.loaded["askgpt.errors"].show = function(msg)
+  stream_ask_calls._last_error = msg
+end
+
+local fork_should_fail = false
+local fork_calls = {}
+package.loaded["ffi/util"] = {
+  runInSubProcess = function(fn, with_pipe)
+    table.insert(fork_calls, { with_pipe = with_pipe })
+    if fork_should_fail then return nil end
+    return 999  -- fake pid
+  end,
+  isSubProcessDone = function(pid) return true end,
+}
+package.loaded["json"] = {
+  encode = function(t) return "{}" end,
+  decode = function(s)
+    if s == "{}" then return {} end
+    return nil
+  end,
+}
+
+-- Reset workflow to pick up new stubs
+H.reset("askgpt.workflow")
+local Workflow2 = require("askgpt.workflow")
+
+-- ask() with empty text should show error and NOT fork
+fork_calls = {}
+stream_ask_calls._last_error = nil
+H.no_error("ask() with empty text does not crash", function()
+  Workflow2.ask(fake_ui, { term = "", highlighted_text = "" }, "")
+end)
+H.eq("ask() empty text: no fork",  #fork_calls, 0)
+H.is_true("ask() empty text: error shown",
+          stream_ask_calls._last_error ~= nil)
+
+-- ask() fork failure
+fork_should_fail = true
+fork_calls = {}
+spy.shown = {}
+stream_ask_calls._last_error = nil
+H.no_error("ask() fork failure does not crash", function()
+  Workflow2.ask(fake_ui, { term = "hello", question = "what?" }, "hello")
+end)
+H.eq("ask() fork failure: one fork attempted", #fork_calls, 1)
+H.is_true("ask() fork failure: error shown",
+          stream_ask_calls._last_error ~= nil)
+
+-- ask() successful fork: opens viewer immediately
+fork_should_fail = false
+fork_calls = {}
+spy.shown = {}
+H.no_error("ask() successful fork runs without error", function()
+  Workflow2.ask(fake_ui, { term = "hello", question = "what?" }, "hello")
+end)
+H.eq("ask() successful fork: forked once", #fork_calls, 1)
+local ask_viewer_shown = false
+for _, w in ipairs(spy.shown) do
+  if w._type == "ChatGPTViewer" then ask_viewer_shown = true end
+end
+H.is_true("ask() successful fork: ChatGPTViewer shown immediately", ask_viewer_shown)

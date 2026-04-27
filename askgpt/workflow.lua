@@ -318,4 +318,180 @@ function Workflow.analyze(ui, options, default_highlighted)
                                 doc_file_sha256, get_doc_location(ui))
 end
 
+-- ── Ask → SSE 流式（子进程 + tmpfile 轮询）────────────────────────────────────
+--
+-- 流程：
+--   1. 立即打开 ChatGPTViewer（显示"正在思考..."）
+--   2. fork 子进程调用 AiClient.streamAsk，把 delta 写入 tmpfile
+--   3. 主进程每 1.5s 读 tmpfile，更新 viewer
+--   4. 收到 <<ASKGPT_DONE>> → 格式化最终结果，刷新 viewer，支持继续提问
+--   5. 用户关闭 viewer → 停止轮询，删除 tmpfile
+--
+function Workflow.ask(ui, options, default_highlighted)
+  local ffiutil = require("ffi/util")
+  local json    = require("json")
+
+  local doc_title, doc_author, doc_file_sha256 = get_doc_props(ui)
+  local doc_location = get_doc_location(ui)
+
+  local text     = Util.trim(options.term or options.highlighted_text or default_highlighted or "")
+  local question = Util.trim(options.question or "")
+
+  if text == "" then
+    Errors.show(_("请先选中文字再提问。"))
+    return
+  end
+
+  math.randomseed(os.time())
+  local tmpfile = string.format("/tmp/askgpt_ask_%d_%d.txt", os.time(), math.random(99999))
+
+  local POLL_INTERVAL = 1.5
+  local DONE_MARKER   = "<<ASKGPT_DONE>>"
+  local ERROR_MARKER  = "<<ASKGPT_ERROR>>"
+
+  local current_viewer  = nil
+  local polling_active  = false
+  local stream_complete = false
+
+  local stream_params = {
+    text        = text,
+    question    = question,
+    file_sha256 = doc_file_sha256,
+    book        = build_book(doc_title, doc_author, doc_file_sha256),
+    location    = doc_location,
+  }
+
+  local function stop_and_cleanup()
+    polling_active = false
+    pcall(os.remove, tmpfile)
+  end
+
+  local function show_viewer(display_text, callbacks)
+    if current_viewer then UIManager:close(current_viewer) end
+    current_viewer = ChatGPTViewer:new {
+      ui             = ui,
+      title          = options.viewer_title or _("Ask GPT"),
+      text           = display_text,
+      close_callback = callbacks and callbacks.on_close or nil,
+      onAskQuestion  = callbacks and callbacks.on_ask or function(_, _)
+        UIManager:show(InfoMessage:new { text = _("请等待回答完成。"), timeout = 2 })
+      end,
+      onAddToNote = callbacks and callbacks.on_note or function(_)
+        UIManager:show(InfoMessage:new { text = _("请等待回答完成。"), timeout = 2 })
+      end,
+    }
+    UIManager:show(current_viewer)
+  end
+
+  -- 初始占位 viewer
+  show_viewer(_("正在思考..."), { on_close = stop_and_cleanup })
+  polling_active = true
+
+  -- Fork 子进程
+  local pid = ffiutil.runInSubProcess(function()
+    AiClient.streamAsk(stream_params, tmpfile)
+  end, false)
+
+  if not pid then
+    polling_active = false
+    UIManager:close(current_viewer)
+    pcall(os.remove, tmpfile)
+    Errors.show(_("无法启动流式查询（系统资源不足）。"))
+    return
+  end
+
+  local last_content = ""
+
+  local function poll()
+    if not polling_active then return end
+
+    local f = io.open(tmpfile, "r")
+    local raw = f and f:read("*a") or ""
+    if f then f:close() end
+
+    local done_pos  = raw:find(DONE_MARKER,  1, true)
+    local error_pos = raw:find(ERROR_MARKER, 1, true)
+
+    if error_pos then
+      stop_and_cleanup()
+      stream_complete = true
+      UIManager:close(current_viewer)
+      Errors.show_request_error(raw:sub(error_pos + #ERROR_MARKER), _("Ask GPT"))
+      return
+    end
+
+    if done_pos then
+      stop_and_cleanup()
+      stream_complete = true
+
+      local delta_text = raw:sub(1, done_pos - 1)
+      local final_str  = raw:sub(done_pos + #DONE_MARKER)
+      local ok_j, final = pcall(json.decode, final_str)
+
+      local formatted
+      if ok_j and type(final) == "table" then
+        formatted = Formatter.ask {
+          highlighted_text = options.highlighted_text or default_highlighted,
+          question         = question,
+          answer           = final.answer,
+          sources          = final.sources,
+          title            = doc_title,
+          author           = doc_author,
+          file_sha256      = doc_file_sha256,
+        }
+      else
+        formatted = delta_text ~= "" and delta_text or _("回答完毕，但无法解析结果。")
+      end
+
+      local final_text = formatted
+      show_viewer(formatted, {
+        on_close = function() end,
+        on_ask = function(_, input)
+          local trimmed = Util.trim(input or "")
+          if trimmed == "" then return end
+          Workflow.ask(ui, {
+            term             = text,
+            highlighted_text = options.highlighted_text or default_highlighted,
+            question         = trimmed,
+            viewer_title     = options.viewer_title or _("Ask GPT"),
+          }, default_highlighted)
+        end,
+        on_note = function(_)
+          if ui.highlight and ui.highlight.addNote then
+            ui.highlight:addNote(final_text)
+            UIManager:close(current_viewer)
+            if ui.highlight.onClose then ui.highlight:onClose() end
+          end
+        end,
+      })
+      return
+    end
+
+    -- 仍在流式：有新内容则更新 viewer
+    if raw ~= "" and raw ~= last_content then
+      last_content = raw
+      show_viewer(raw, { on_close = stop_and_cleanup })
+    end
+
+    -- 子进程异常退出（未写 DONE/ERROR）
+    if ffiutil.isSubProcessDone(pid) and not stream_complete then
+      stop_and_cleanup()
+      stream_complete = true
+      if last_content ~= "" then
+        show_viewer(last_content .. "\n\n[Stream ended unexpectedly]", {
+          on_close = function() end,
+        })
+      else
+        UIManager:close(current_viewer)
+        Errors.show(_("Ask GPT 流式请求异常结束。"))
+      end
+      return
+    end
+
+    UIManager:scheduleIn(POLL_INTERVAL, poll)
+  end
+
+  UIManager:scheduleIn(POLL_INTERVAL, poll)
+end
+
 return Workflow

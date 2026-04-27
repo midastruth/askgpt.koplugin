@@ -157,4 +157,42 @@ function Formatter.analysis(args)
   return table.concat(segments, "\n\n")
 end
 
+-- args: highlighted_text, question, answer{text, brief}, sources[], title, author, file_sha256
+function Formatter.ask(args)
+  local segments = {}
+  local answer = type(args.answer) == "table" and args.answer or {}
+
+  if args.highlighted_text and args.highlighted_text ~= "" then
+    table.insert(segments, _("Highlighted text: ") .. "\"" .. args.highlighted_text .. "\"")
+  end
+  if args.question and args.question ~= "" then
+    table.insert(segments, _("Question: ") .. args.question)
+  end
+
+  local answer_text = answer.text or ""
+  if answer_text ~= "" then
+    table.insert(segments, answer_text)
+  end
+
+  if type(args.sources) == "table" and #args.sources > 0 then
+    local src_parts = {}
+    for _, src in ipairs(args.sources) do
+      if type(src) == "table" then
+        local s = src.chapter and src.chapter ~= "" and ("[" .. src.chapter .. "] ") or ""
+        if src.preview and src.preview ~= "" then s = s .. src.preview end
+        if s ~= "" then table.insert(src_parts, s) end
+      end
+    end
+    if #src_parts > 0 then
+      table.insert(segments, _("Sources:") .. "\n" .. table.concat(src_parts, "\n"))
+    end
+  end
+
+  local doc_info = format_doc_info(args)
+  if doc_info then table.insert(segments, doc_info) end
+
+  if #segments == 0 then return _("No answer available.") end
+  return table.concat(segments, "\n\n")
+end
+
 return Formatter

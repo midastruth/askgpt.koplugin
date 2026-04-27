@@ -27,12 +27,11 @@ function DialogController.show(ui, highlight_source)
       callback = function()
         local question = input_dialog and Util.trim(input_dialog:getInputText()) or ""
         UIManager:close(input_dialog)
-        Workflow.lookup(ui, {
+        Workflow.ask(ui, {
           term             = highlighted_text,
           highlighted_text = highlighted_text,
           question         = question,
-          action           = "ask",
-          viewer_title     = _("Reader AI Dictionary"),
+          viewer_title     = _("Ask GPT"),
         }, highlighted_text)
       end,
     },

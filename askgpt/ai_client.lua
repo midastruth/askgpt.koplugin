@@ -13,9 +13,10 @@ local REQUEST_TIMEOUT    = 10   -- 秒
 local MAX_RETRY_ATTEMPTS = 3
 local RETRY_DELAY        = 2    -- 秒
 
-local DEFAULT_READ_PATH = "/ai/query"
+local DEFAULT_READ_PATH        = "/ai/query"
+local DEFAULT_ASK_STREAM_PATH  = "/ai/query/stream"
 local DEFAULT_IMPORT_EPUB_PATH = "/books/import/epub"
-local DEFAULT_BOOKS_PATH = "/books"
+local DEFAULT_BOOKS_PATH       = "/books"
 
 local AiClient = {}
 AiClient.MAX_RETRY_ATTEMPTS = MAX_RETRY_ATTEMPTS  -- 供外部错误提示引用
@@ -117,6 +118,13 @@ local function resolve_service_base_url()
              :gsub("/read$", "")
              :gsub("/ai$", "")
   return base
+end
+
+local function resolve_ask_stream_endpoint()
+  local path = normalize_path(
+    pick_config_path("reader_ai_ask_stream_path") or DEFAULT_ASK_STREAM_PATH
+  )
+  return resolve_service_base_url() .. path
 end
 
 local function resolve_import_epub_endpoint()
@@ -436,6 +444,111 @@ function AiClient.importEpub(params)
     error("Book-Aware EPUB import response did not contain a JSON object.")
   end
   return decoded
+end
+
+-- ── SSE 流式 Ask ─────────────────────────────────────────────────────────
+-- 在子进程中调用；把增量文字和最终结果写入 tmpfile，供主进程轮询。
+-- 写入格式：
+--   增量中：直接写累积文字
+--   完成时：累积文字 .. "<<ASKGPT_DONE>>" .. json(final)
+--   出错时："<<ASKGPT_ERROR>>" .. message
+function AiClient.streamAsk(params, tmpfile)
+  if type(params) ~= "table" then
+    error("streamAsk expects a parameter table.")
+  end
+
+  local endpoint = resolve_ask_stream_endpoint()
+  local lib      = choose_lib(endpoint)
+
+  local payload = {
+    action = "ask",
+    text   = Util.trim(params.text or params.term or ""),
+  }
+  add_read_metadata(payload, params)
+  local body = json.encode(payload)
+
+  local accumulated = ""
+  local line_buf    = ""
+  local finished    = false
+
+  local function write_tmp(content)
+    local f = io.open(tmpfile, "w")
+    if f then f:write(content) f:close() end
+  end
+
+  local function process_line(line)
+    if finished then return end
+    if not line:match("^data: ") then return end
+    local data = line:sub(7)
+    if data == "" then return end
+
+    local ok, ev = pcall(json.decode, data)
+    if not ok or type(ev) ~= "table" then return end
+
+    if type(ev.text) == "string" then
+      accumulated = accumulated .. ev.text
+      write_tmp(accumulated)
+    elseif ev.answer ~= nil then
+      finished = true
+      local final_blob = json.encode({
+        answer     = ev.answer,
+        sources    = ev.sources,
+        session_id = ev.session_id,
+      })
+      write_tmp(accumulated .. "<<ASKGPT_DONE>>" .. final_blob)
+    elseif ev.code ~= nil then
+      finished = true
+      write_tmp("<<ASKGPT_ERROR>>" .. tostring(ev.message or ev.code))
+    end
+  end
+
+  local sink = function(chunk, _)
+    if chunk == nil then
+      if line_buf ~= "" then
+        process_line(line_buf)
+        line_buf = ""
+      end
+      return 1
+    end
+    line_buf = line_buf .. chunk
+    while true do
+      local nl = line_buf:find("\n")
+      if not nl then break end
+      local line = line_buf:sub(1, nl - 1):gsub("\r$", "")
+      line_buf = line_buf:sub(nl + 1)
+      process_line(line)
+    end
+    return 1
+  end
+
+  local prev_timeout = lib.TIMEOUT
+  lib.TIMEOUT = 90
+
+  local ok, res, code = pcall(function()
+    return lib.request({
+      url    = endpoint,
+      method = "POST",
+      headers = {
+        ["Accept"]         = "text/event-stream",
+        ["Content-Type"]   = "application/json",
+        ["Content-Length"] = tostring(#body),
+      },
+      source = ltn12.source.string(body),
+      sink   = sink,
+    })
+  end)
+
+  lib.TIMEOUT = prev_timeout
+
+  if not finished then
+    if not ok then
+      write_tmp("<<ASKGPT_ERROR>>Connection failed: " .. tostring(res))
+    elseif not res or (tonumber(code) and tonumber(code) ~= 200) then
+      write_tmp("<<ASKGPT_ERROR>>HTTP " .. tostring(code))
+    else
+      write_tmp("<<ASKGPT_ERROR>>Stream ended without final event")
+    end
+  end
 end
 
 return AiClient
