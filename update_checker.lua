@@ -109,7 +109,7 @@ local function request_url(url, extra_headers)
     https.TIMEOUT = TIMEOUT
 
     local headers = {
-      ["Accept"]     = "application/vnd.github.v3+json, application/octet-stream",
+      ["Accept"]     = "application/vnd.github+json",
       ["User-Agent"] = "askgpt-koplugin-updater",
     }
     if type(extra_headers) == "table" then
@@ -215,12 +215,31 @@ local function download_zip(url)
     return nil, "No downloadable zip asset was found in the latest release."
   end
 
-  local body, code, err = request_url(url, { ["Accept"] = "application/octet-stream" })
+  local path = tmp_path("askgpt-update-" .. timestamp() .. ".zip")
+
+  -- Prefer curl/wget: they handle CDN redirects and binary downloads
+  -- reliably without Content-Type negotiation issues (HTTP 415).
+  local curl_bin = read_command_first_line("command -v curl 2>/dev/null")
+  local wget_bin = read_command_first_line("command -v wget 2>/dev/null")
+
+  if curl_bin and curl_bin ~= "" then
+    local ok = run_command(
+      "curl -fsSL --max-time 120 -o " .. shell_quote(path) .. " " .. shell_quote(url)
+    )
+    if ok and file_exists(path) then return path end
+  elseif wget_bin and wget_bin ~= "" then
+    local ok = run_command(
+      "wget -q --timeout=120 -O " .. shell_quote(path) .. " " .. shell_quote(url)
+    )
+    if ok and file_exists(path) then return path end
+  end
+
+  -- Fallback: download via ssl.https (buffers entire zip in RAM).
+  local body, code, err = request_url(url, { ["Accept"] = "*/*" })
   if code ~= 200 or not body then
     return nil, "Download failed: " .. tostring(code or err)
   end
 
-  local path = tmp_path("askgpt-update-" .. timestamp() .. ".zip")
   local f = io.open(path, "wb")
   if not f then return nil, "Cannot write update zip: " .. path end
   f:write(body)
