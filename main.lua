@@ -18,6 +18,10 @@ local AskGPT = InputContainer:new {
 
 local updateMessageShown = false
 
+local function isFileManagerUI(ui)
+  return ui and type(ui.addFileDialogButtons) == "function"
+end
+
 local function autoUploadEnabled()
   local cfg = Config.get()
   return type(cfg) == "table"
@@ -48,7 +52,9 @@ function AskGPT:init()
   self.ui.menu:registerToMainMenu(self)
 
   -- 文件管理器：长按书籍文件弹出"上传到 Book-Aware"按钮
-  if self.ui.file_chooser then
+  -- 注意：FileManager 加载插件时 file_chooser 可能尚未创建，不能用
+  -- self.ui.file_chooser 判断；addFileDialogButtons 方法才是稳定特征。
+  if isFileManagerUI(self.ui) then
     self.ui:addFileDialogButtons("askgpt_upload_file", function(file, is_file)
       if not is_file then return end
       local ext = tostring(file or ""):lower():match("%.([^.]+)$")
@@ -66,6 +72,10 @@ function AskGPT:init()
         },
       }
     end)
+    return
+  end
+
+  if not self.ui.highlight or type(self.ui.highlight.addToHighlightDialog) ~= "function" then
     return
   end
 
@@ -106,7 +116,7 @@ end
 
 -- "稍后查看"入口：在 Reader 主菜单注册 AskGPT Results 条目
 function AskGPT:addToMainMenu(menu_items)
-  if not self.ui.file_chooser then
+  if not isFileManagerUI(self.ui) then
     menu_items.askgpt_upload_book = {
       text = _("Upload current book to Book-Aware"),
       callback = function()

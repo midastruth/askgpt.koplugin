@@ -75,7 +75,8 @@ local fm_dialog_calls    = {}  -- addFileDialogButtons call log
 
 local fake_fm_self = {
   ui = {
-    file_chooser = {},  -- presence signals FileManager context
+    -- Real KOReader FileManager loads plugins before file_chooser is created.
+    -- addFileDialogButtons is the stable FileManager capability to detect.
     menu = {
       registerToMainMenu = function(_, obj)
         table.insert(fm_reg_calls, obj)
