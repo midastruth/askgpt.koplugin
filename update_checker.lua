@@ -35,9 +35,21 @@ local function shell_quote(value)
 end
 
 local function command_ok(result, how, code)
-  -- Lua 5.1 returns the process status number directly. Lua 5.2+ returns
-  -- true/nil plus an exit reason and status code.
+  -- Lua 5.1 returns the raw wait status number directly (exit 12 => 3072).
+  -- Lua 5.2+ returns true/nil plus an exit reason and status code.
   if result == true or result == 0 then return true end
+
+  if type(result) == "number" then
+    local exit_code = result
+    if result > 255 then exit_code = math.floor(result / 256) end
+    if exit_code == 0 then return true end
+    return false, "exit " .. tostring(exit_code) .. " (status " .. tostring(result) .. ")"
+  end
+
+  if result == nil and code ~= nil then
+    return false, tostring(how or "exit") .. " " .. tostring(code)
+  end
+
   return false, tostring(result) .. " " .. tostring(how) .. " " .. tostring(code)
 end
 
@@ -293,7 +305,9 @@ local function install_zip(zip_path)
 
   local config_backup = tmp_path("askgpt-configuration-" .. timestamp() .. ".lua")
   local script = tmp_path("askgpt-install-" .. timestamp() .. ".sh")
-  local backup_dir = dst .. ".backup-" .. timestamp()
+  -- Keep backup in /tmp instead of next to the plugin. Some devices allow
+  -- writing inside the plugin dir but not creating siblings in its parent.
+  local backup_dir = tmp_path("askgpt-backup-" .. timestamp())
 
   local script_body = table.concat({
     "#!/bin/sh",
@@ -304,9 +318,10 @@ local function install_zip(zip_path)
     "BACKUP_DIR=" .. shell_quote(backup_dir),
     "[ -f \"$SRC/_meta.lua\" ] || exit 10",
     "[ -f \"$SRC/main.lua\" ] || exit 11",
-    "mkdir -p \"$BACKUP_DIR\" || exit 12",
+    "mkdir -p \"$BACKUP_DIR\" || true",
     "cp -a \"$DST\"/. \"$BACKUP_DIR\"/ 2>/dev/null || true",
     "if [ -f \"$DST/configuration.lua\" ]; then cp \"$DST/configuration.lua\" \"$CONFIG_BACKUP\" || exit 13; fi",
+    "mkdir -p \"$DST\" || exit 16",
     "cp -a \"$SRC\"/. \"$DST\"/ || exit 14",
     "if [ -f \"$CONFIG_BACKUP\" ]; then cp \"$CONFIG_BACKUP\" \"$DST/configuration.lua\" || exit 15; fi",
     "rm -f \"$CONFIG_BACKUP\"",
