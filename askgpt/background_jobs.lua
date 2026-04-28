@@ -78,14 +78,33 @@ end
 local function notify_done(ui, job)
   local label = job.kind == "summarize" and _("AI摘要") or _("AI分析")
   if job.status == "done" then
-    UIManager:show(ConfirmBox:new {
-      text        = label .. _("已完成，是否立即查看？"),
-      ok_text     = _("View"),
-      cancel_text = _("Later"),
-      ok_callback = function()
-        open_result_viewer(ui, job)
-      end,
-    })
+    local text = label .. _("已完成，是否立即查看？")
+    local ok, TopNotification = pcall(require, "askgpt.top_notification")
+    local shown = false
+    if ok and TopNotification then
+      shown = pcall(function()
+        UIManager:show(TopNotification:new {
+          text        = text,
+          ok_text     = _("View"),
+          cancel_text = _("Later"),
+          timeout     = 8,
+          ok_callback = function()
+            open_result_viewer(ui, job)
+          end,
+        })
+      end)
+    end
+    if not shown then
+      -- 兼容兜底：如果旧版 KOReader 缺少顶部通知依赖，则仍使用原确认框。
+      UIManager:show(ConfirmBox:new {
+        text        = text,
+        ok_text     = _("View"),
+        cancel_text = _("Later"),
+        ok_callback = function()
+          open_result_viewer(ui, job)
+        end,
+      })
+    end
   else
     Errors.show(label .. _("失败：") .. (job.error_message or "unknown error"))
   end

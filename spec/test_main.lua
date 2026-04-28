@@ -138,6 +138,21 @@ H.is_true("askgpt_results.text is a string",
 H.is_true("askgpt_results.callback is a function",
           type(menu_items.askgpt_results and menu_items.askgpt_results.callback) == "function")
 
+-- Recent Results callback must not crash KOReader if the result dialog fails.
+H.reset("main")
+package.loaded["askgpt.background_jobs"] = {
+  show_results_menu = function() error("boom") end,
+}
+AskGPT = require("main")
+local safe_menu_items = {}
+AskGPT.addToMainMenu(fake_self, safe_menu_items)
+spy.shown = {}
+H.no_error("askgpt_results.callback catches errors", function()
+  safe_menu_items.askgpt_results.callback()
+end)
+H.contains("askgpt_results.callback shows failure message",
+           spy.shown[1] and spy.shown[1].text or "", "打开 AskGPT 最近结果失败")
+
 -- In FileManager context, askgpt_upload_book must NOT appear (no open book).
 local fm_menu_items = {}
 H.no_error("addToMainMenu() in FileManager context runs without error", function()

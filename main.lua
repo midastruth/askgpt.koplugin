@@ -147,7 +147,15 @@ function AskGPT:addToMainMenu(menu_items)
   menu_items.askgpt_results = {
     text = _("AskGPT Recent Results"),
     callback = function()
-      BackgroundJobs.show_results_menu(self.ui)
+      local ok, err = pcall(function()
+        BackgroundJobs.show_results_menu(self.ui)
+      end)
+      if not ok then
+        UIManager:show(InfoMessage:new {
+          text    = _("打开 AskGPT 最近结果失败：") .. tostring(err),
+          timeout = 6,
+        })
+      end
     end,
   }
 end
