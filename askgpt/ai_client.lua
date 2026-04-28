@@ -9,9 +9,11 @@ local socket = require("socket")
 local Util   = require("askgpt.util")
 local Config = require("askgpt.config")
 
-local REQUEST_TIMEOUT    = 10   -- 秒
-local MAX_RETRY_ATTEMPTS = 3
-local RETRY_DELAY        = 2    -- 秒
+local REQUEST_TIMEOUT          = 10   -- 秒
+local BOOK_LOOKUP_TIMEOUT      = 30   -- 秒
+local IMPORT_EPUB_TIMEOUT      = 300  -- 秒：EPUB 上传/后端导入可能较慢
+local MAX_RETRY_ATTEMPTS       = 3
+local RETRY_DELAY              = 2    -- 秒
 
 local DEFAULT_READ_PATH        = "/ai/query"
 local DEFAULT_ASK_STREAM_PATH  = "/ai/query/stream"
@@ -73,7 +75,7 @@ local function resolve_base_url()
   error("No valid API endpoint configured (set reader_ai_base_url or a non-OpenAI base_url)")
 end
 
-local function pick_config_path(key)
+local function pick_config_value(key)
   local cfg = Config.get()
   if not cfg then return nil end
   local current = cfg
@@ -81,7 +83,20 @@ local function pick_config_path(key)
     if type(current) ~= "table" then return nil end
     current = current[part]
   end
-  if type(current) == "string" and current ~= "" then return current end
+  return current
+end
+
+local function pick_config_path(key)
+  local value = pick_config_value(key)
+  if type(value) == "string" and value ~= "" then return value end
+  return nil
+end
+
+local function pick_config_number(key)
+  local value = pick_config_value(key)
+  if value == nil or value == "" then return nil end
+  value = tonumber(value)
+  if value and value > 0 then return value end
   return nil
 end
 
@@ -144,6 +159,20 @@ local function resolve_book_lookup_endpoint(sha256)
   local path = normalize_path(pick_config_path("reader_ai_books_path") or DEFAULT_BOOKS_PATH)
   if path:sub(-1) == "/" then path = path:sub(1, -2) end
   return resolve_service_base_url() .. path .. "/" .. url_encode(sha256)
+end
+
+local function resolve_book_lookup_timeout()
+  return pick_config_number("reader_ai_book_lookup_timeout")
+      or pick_config_number("book_aware_lookup_timeout")
+      or BOOK_LOOKUP_TIMEOUT
+end
+
+local function resolve_import_epub_timeout()
+  return pick_config_number("reader_ai_import_epub_timeout")
+      or pick_config_number("reader_ai_import_timeout")
+      or pick_config_number("reader_ai_upload_timeout")
+      or pick_config_number("book_aware_upload_timeout")
+      or IMPORT_EPUB_TIMEOUT
 end
 
 local function has_values(t)
@@ -396,7 +425,7 @@ function AiClient.getBook(sha256)
     url     = endpoint,
     method  = "GET",
     headers = { ["Accept"] = "application/json" },
-  })
+  }, resolve_book_lookup_timeout())
 
   if not success then
     if tonumber(status_code) == 404 then return nil end
@@ -440,7 +469,10 @@ function AiClient.importEpub(params)
   if params.markdown and params.markdown ~= "" then payload.markdown = params.markdown end
   if params.markdown_path and params.markdown_path ~= "" then payload.markdown_path = params.markdown_path end
 
-  local decoded = perform_json_post(resolve_import_epub_endpoint(), payload, "Book-Aware EPUB import")
+  local decoded = perform_json_post(
+    resolve_import_epub_endpoint(), payload,
+    "Book-Aware EPUB import", resolve_import_epub_timeout()
+  )
   if type(decoded) ~= "table" then
     error("Book-Aware EPUB import response did not contain a JSON object.")
   end

@@ -35,7 +35,7 @@ end
 
 -- ── helper: fresh AiClient with controllable request mocks ────────────────
 
-local function load_ai_client(base_url)
+local function load_ai_client(config)
   H.reset("askgpt.ai_client", "askgpt.config", "askgpt.util")
   package.loaded["socket.http"] = http_lib
   package.loaded["ssl.https"]   = https_lib
@@ -48,8 +48,16 @@ local function load_ai_client(base_url)
     encode = function() return "{}" end,
     decode = function() return {} end,
   }
+  local cfg
+  if type(config) == "table" then
+    cfg = {}
+    for k, v in pairs(config) do cfg[k] = v end
+    if not cfg.reader_ai_base_url then cfg.reader_ai_base_url = "https://example.com" end
+  else
+    cfg = { reader_ai_base_url = config or "https://example.com" }
+  end
   package.loaded["askgpt.config"] = {
-    get      = function() return { reader_ai_base_url = base_url or "https://example.com" } end,
+    get      = function() return cfg end,
     validate = function() return true end,
   }
   return require("askgpt.ai_client")
@@ -85,6 +93,36 @@ do
   local AiClient = load_ai_client()
   pcall(AiClient.dictionaryLookup, { term = "serendipity" })
   H.eq("dictionaryLookup uses default 10s timeout", last_https_timeout, 10)
+end
+
+-- Book-Aware lookup gets a longer timeout than normal read queries.
+do
+  make_libs()
+  for _ = 1, 3 do request_results[#request_results+1] = {nil, nil, nil} end
+  last_https_timeout = nil
+  local AiClient = load_ai_client()
+  pcall(AiClient.getBook, "abc123")
+  H.eq("getBook uses 30s timeout", last_https_timeout, 30)
+end
+
+-- EPUB import gets a long timeout to avoid LuaSec wantread during upload/import.
+do
+  make_libs()
+  for _ = 1, 3 do request_results[#request_results+1] = {nil, nil, nil} end
+  last_https_timeout = nil
+  local AiClient = load_ai_client()
+  pcall(AiClient.importEpub, { content_base64 = "YWJj" })
+  H.eq("importEpub uses 300s timeout", last_https_timeout, 300)
+end
+
+-- EPUB import timeout can be overridden by configuration.
+do
+  make_libs()
+  for _ = 1, 3 do request_results[#request_results+1] = {nil, nil, nil} end
+  last_https_timeout = nil
+  local AiClient = load_ai_client({ reader_ai_import_epub_timeout = 123 })
+  pcall(AiClient.importEpub, { content_base64 = "YWJj" })
+  H.eq("importEpub uses configured timeout", last_https_timeout, 123)
 end
 
 -- TIMEOUT is restored after each request (no global side-effect).
