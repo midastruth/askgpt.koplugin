@@ -31,6 +31,23 @@ local function choose_lib(url)
 end
 
 local function extract_error_detail(raw_error)
+  local function stringify_detail(detail)
+    if detail == nil then return nil end
+    if type(detail) == "table" then
+      local nested = stringify_detail(detail.detail or detail.message or detail.error or detail.error_description)
+      if nested then
+        local code = detail.code and tostring(detail.code) or nil
+        return code and (code .. ": " .. nested) or nested
+      end
+      local enc_ok, encoded = pcall(json.encode, detail)
+      detail = enc_ok and encoded or tostring(detail)
+    elseif type(detail) ~= "string" then
+      detail = tostring(detail)
+    end
+    detail = Util.trim(detail)
+    return detail ~= "" and detail or nil
+  end
+
   if raw_error == nil then return nil end
   if type(raw_error) ~= "string" then raw_error = tostring(raw_error) end
   local message = Util.trim(raw_error)
@@ -39,19 +56,38 @@ local function extract_error_detail(raw_error)
   if first == "{" or first == "[" then
     local ok, decoded = pcall(json.decode, message)
     if ok and type(decoded) == "table" then
-      local detail = decoded.detail or decoded.message or decoded.error or decoded.error_description
-      if detail ~= nil then
-        if type(detail) == "table" then
-          local enc_ok, encoded = pcall(json.encode, detail)
-          detail = enc_ok and encoded or tostring(detail)
-        end
-        if type(detail) ~= "string" then detail = tostring(detail) end
-        detail = Util.trim(detail)
-        if detail ~= "" then return detail end
-      end
+      local detail = stringify_detail(decoded.detail or decoded.message or decoded.error or decoded.error_description)
+      if detail then return detail end
     end
   end
   return message
+end
+
+local function format_bytes(bytes)
+  bytes = tonumber(bytes)
+  if not bytes then return "unknown size" end
+  local units = { "B", "KB", "MB", "GB" }
+  local value = bytes
+  local unit = 1
+  while value >= 1024 and unit < #units do
+    value = value / 1024
+    unit = unit + 1
+  end
+  if unit == 1 then return string.format("%d %s", value, units[unit]) end
+  return string.format("%.1f %s", value, units[unit])
+end
+
+local function upload_payload_hint(context_label, request_body)
+  if context_label ~= "Book-Aware EPUB import" or type(request_body) ~= "string" then
+    return ""
+  end
+  local body_size = #request_body
+  if body_size < 4 * 1024 * 1024 then return "" end
+  local epub_size = math.floor(body_size * 3 / 4)
+  return string.format(
+    " (upload payload size: %s, EPUB roughly %s; if you use the public read.opensociety.eu.org backend, this usually means the EPUB is larger than its request-body limit. Use a smaller EPUB, raise the backend/proxy body-size limit, or switch to a backend that supports streaming/multipart upload.)",
+    format_bytes(body_size), format_bytes(epub_size)
+  )
 end
 
 -- ── endpoint 解析 ─────────────────────────────────────────────────────────
@@ -287,6 +323,7 @@ end
 
 local function perform_json_post(endpoint, payload, context_label, timeout)
   local body = json.encode(payload)
+  local payload_hint = upload_payload_hint(context_label, body)
   local success, status_code, response_chunks = http_request_with_retry({
     url     = endpoint,
     method  = "POST",
@@ -302,14 +339,15 @@ local function perform_json_post(endpoint, payload, context_label, timeout)
     if status_code then
       local friendly = extract_error_detail(response_chunks) or tostring(response_chunks or "")
       error(string.format(
-        "%s backend returned HTTP %s: %s",
+        "%s backend returned HTTP %s: %s%s",
         context_label, tostring(status_code),
-        friendly ~= "" and friendly or "unknown error"
+        friendly ~= "" and friendly or "unknown error",
+        payload_hint
       ))
     end
     error(string.format(
-      "Failed to contact %s backend after %d attempts. Last error: %s",
-      context_label, MAX_RETRY_ATTEMPTS, tostring(response_chunks)
+      "Failed to contact %s backend after %d attempts. Last error: %s%s",
+      context_label, MAX_RETRY_ATTEMPTS, tostring(response_chunks), payload_hint
     ))
   end
 
