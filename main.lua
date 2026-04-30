@@ -114,10 +114,27 @@ function AskGPT:init()
   end
 end
 
--- "稍后查看"入口：在 Reader 主菜单注册 AskGPT Results 条目
+-- AskGPT 入口：统一放到 Tools/工具 菜单下的 AskGPT 子菜单
 function AskGPT:addToMainMenu(menu_items)
+  local askgpt_items = {
+    {
+      text = _("Recent results"),
+      callback = function()
+        local ok, err = pcall(function()
+          BackgroundJobs.show_results_menu(self.ui)
+        end)
+        if not ok then
+          UIManager:show(InfoMessage:new {
+            text    = _("打开 AskGPT 最近结果失败：") .. tostring(err),
+            timeout = 6,
+          })
+        end
+      end,
+    },
+  }
+
   if not isFileManagerUI(self.ui) then
-    menu_items.askgpt_upload_book = {
+    table.insert(askgpt_items, {
       text = _("Upload current book to Book-Aware"),
       callback = function()
         if not checkNetworkAndConfig() then return end
@@ -125,10 +142,10 @@ function AskGPT:addToMainMenu(menu_items)
           BookUpload.upload_current(self.ui)
         end)
       end,
-    }
+    })
   end
 
-  menu_items.askgpt_update = {
+  table.insert(askgpt_items, {
     text = _("检查 AskGPT 更新"),
     callback = function()
       if not NetworkMgr:isOnline() then
@@ -142,21 +159,12 @@ function AskGPT:addToMainMenu(menu_items)
         UpdateChecker.checkAndPromptInstall()
       end)
     end,
-  }
+  })
 
-  menu_items.askgpt_results = {
-    text = _("AskGPT Recent Results"),
-    callback = function()
-      local ok, err = pcall(function()
-        BackgroundJobs.show_results_menu(self.ui)
-      end)
-      if not ok then
-        UIManager:show(InfoMessage:new {
-          text    = _("打开 AskGPT 最近结果失败：") .. tostring(err),
-          timeout = 6,
-        })
-      end
-    end,
+  menu_items.askgpt = {
+    text = _("AskGPT"),
+    sorting_hint = "tools",
+    sub_item_table = askgpt_items,
   }
 end
 

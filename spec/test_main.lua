@@ -121,22 +121,18 @@ H.no_error("addToMainMenu() runs without error", function()
   AskGPT.addToMainMenu(fake_self, menu_items)
 end)
 
-H.is_true("addToMainMenu creates askgpt_upload_book key",
-          menu_items.askgpt_upload_book ~= nil)
-H.is_true("askgpt_upload_book.callback is a function",
-          type(menu_items.askgpt_upload_book and menu_items.askgpt_upload_book.callback) == "function")
-H.is_true("addToMainMenu creates askgpt_update key",
-          menu_items.askgpt_update ~= nil)
-H.is_true("askgpt_update.text is a string",
-          type(menu_items.askgpt_update and menu_items.askgpt_update.text) == "string")
-H.is_true("askgpt_update.callback is a function",
-          type(menu_items.askgpt_update and menu_items.askgpt_update.callback) == "function")
-H.is_true("addToMainMenu creates askgpt_results key",
-          menu_items.askgpt_results ~= nil)
-H.is_true("askgpt_results.text is a string",
-          type(menu_items.askgpt_results and menu_items.askgpt_results.text) == "string")
-H.is_true("askgpt_results.callback is a function",
-          type(menu_items.askgpt_results and menu_items.askgpt_results.callback) == "function")
+H.is_true("addToMainMenu creates AskGPT submenu",
+          menu_items.askgpt ~= nil)
+H.eq("AskGPT submenu is hinted into Tools", menu_items.askgpt.sorting_hint, "tools")
+H.is_true("AskGPT submenu has items",
+          type(menu_items.askgpt.sub_item_table) == "table")
+H.eq("Reader AskGPT submenu has three items", #menu_items.askgpt.sub_item_table, 3)
+H.is_true("Recent results item callback is a function",
+          type(menu_items.askgpt.sub_item_table[1].callback) == "function")
+H.is_true("Upload current book item callback is a function",
+          type(menu_items.askgpt.sub_item_table[2].callback) == "function")
+H.is_true("Update item callback is a function",
+          type(menu_items.askgpt.sub_item_table[3].callback) == "function")
 
 -- Recent Results callback must not crash KOReader if the result dialog fails.
 H.reset("main")
@@ -147,10 +143,10 @@ AskGPT = require("main")
 local safe_menu_items = {}
 AskGPT.addToMainMenu(fake_self, safe_menu_items)
 spy.shown = {}
-H.no_error("askgpt_results.callback catches errors", function()
-  safe_menu_items.askgpt_results.callback()
+H.no_error("Recent results callback catches errors", function()
+  safe_menu_items.askgpt.sub_item_table[1].callback()
 end)
-H.contains("askgpt_results.callback shows failure message",
+H.contains("Recent results callback shows failure message",
            spy.shown[1] and spy.shown[1].text or "", "打开 AskGPT 最近结果失败")
 
 -- In FileManager context, askgpt_upload_book must NOT appear (no open book).
@@ -158,9 +154,8 @@ local fm_menu_items = {}
 H.no_error("addToMainMenu() in FileManager context runs without error", function()
   AskGPT.addToMainMenu(fake_fm_self, fm_menu_items)
 end)
-H.is_true("FileManager addToMainMenu: no askgpt_upload_book key",
-          fm_menu_items.askgpt_upload_book == nil)
-H.is_true("FileManager addToMainMenu: askgpt_update still present",
-          fm_menu_items.askgpt_update ~= nil)
-H.is_true("FileManager addToMainMenu: askgpt_results still present",
-          fm_menu_items.askgpt_results ~= nil)
+H.is_true("FileManager addToMainMenu: AskGPT submenu present",
+          fm_menu_items.askgpt ~= nil)
+H.eq("FileManager AskGPT submenu has two items", #fm_menu_items.askgpt.sub_item_table, 2)
+H.is_true("FileManager AskGPT submenu has no upload current book item",
+          fm_menu_items.askgpt.sub_item_table[2].text ~= "Upload current book to Book-Aware")
