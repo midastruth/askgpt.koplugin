@@ -384,7 +384,7 @@ function AiClient.dictionaryLookup(params)
   }
   add_read_metadata(payload, params)
 
-  local decoded = perform_json_post(ep, payload, "Reader AI dictionary")
+  local decoded = perform_json_post(ep, payload, "Reader AI dictionary", 90)
   if type(decoded) ~= "table" then
     error("Reader AI dictionary response did not contain a JSON object.")
   end
