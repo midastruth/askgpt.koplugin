@@ -30,7 +30,7 @@ local TopNotification = InputContainer:extend {
   cancel_callback = function() end,
 
   -- nil/false 表示不自动消失；数字表示秒数。
-  timeout = 8,
+  timeout = 60,
   _timeout_func = nil,
 
   face = Font:getFace("infofont"),
