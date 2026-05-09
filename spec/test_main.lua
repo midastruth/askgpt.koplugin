@@ -6,7 +6,7 @@ local spy = H.mock_koreader()
 
 -- Provide stub modules that main.lua requires
 H.reset("main", "askgpt.config", "askgpt.dialog_controller",
-        "askgpt.background_jobs", "askgpt.book_upload", "update_checker")
+        "askgpt.background_jobs", "askgpt.book_upload", "askgpt.book_sync", "update_checker")
 
 package.loaded["askgpt.config"] = {
   validate = function() return true, {} end,
@@ -21,6 +21,9 @@ package.loaded["askgpt.background_jobs"]   = {
 package.loaded["askgpt.book_upload"] = {
   upload_current = function() end,
   upload_file    = function() end,
+}
+package.loaded["askgpt.book_sync"] = {
+  sync_all = function() end,
 }
 -- update_checker already set by mock_koreader
 
@@ -126,13 +129,15 @@ H.is_true("addToMainMenu creates AskGPT submenu",
 H.eq("AskGPT submenu is hinted into Tools", menu_items.askgpt.sorting_hint, "tools")
 H.is_true("AskGPT submenu has items",
           type(menu_items.askgpt.sub_item_table) == "table")
-H.eq("Reader AskGPT submenu has three items", #menu_items.askgpt.sub_item_table, 3)
+H.eq("Reader AskGPT submenu has four items", #menu_items.askgpt.sub_item_table, 4)
 H.is_true("Recent results item callback is a function",
           type(menu_items.askgpt.sub_item_table[1].callback) == "function")
 H.is_true("Upload current book item callback is a function",
           type(menu_items.askgpt.sub_item_table[2].callback) == "function")
-H.is_true("Update item callback is a function",
+H.is_true("Sync books item callback is a function",
           type(menu_items.askgpt.sub_item_table[3].callback) == "function")
+H.is_true("Update item callback is a function",
+          type(menu_items.askgpt.sub_item_table[4].callback) == "function")
 
 -- Recent Results callback must not crash KOReader if the result dialog fails.
 H.reset("main")
@@ -156,6 +161,6 @@ H.no_error("addToMainMenu() in FileManager context runs without error", function
 end)
 H.is_true("FileManager addToMainMenu: AskGPT submenu present",
           fm_menu_items.askgpt ~= nil)
-H.eq("FileManager AskGPT submenu has two items", #fm_menu_items.askgpt.sub_item_table, 2)
+H.eq("FileManager AskGPT submenu has three items", #fm_menu_items.askgpt.sub_item_table, 3)
 H.is_true("FileManager AskGPT submenu has no upload current book item",
           fm_menu_items.askgpt.sub_item_table[2].text ~= "Upload current book to Book-Aware")

@@ -9,6 +9,7 @@ local Config           = require("askgpt.config")
 local DialogController = require("askgpt.dialog_controller")
 local BackgroundJobs   = require("askgpt.background_jobs")
 local BookUpload       = require("askgpt.book_upload")
+local BookSync         = require("askgpt.book_sync")
 local UpdateChecker    = require("update_checker")
 
 local AskGPT = InputContainer:new {
@@ -27,6 +28,13 @@ local function autoUploadEnabled()
   return type(cfg) == "table"
       and (cfg.reader_ai_auto_upload_book == true
            or cfg.book_aware_auto_upload == true)
+end
+
+local function autoSyncEnabled()
+  local cfg = Config.get()
+  return type(cfg) == "table"
+      and (cfg.reader_ai_auto_sync_books == true
+           or cfg.book_aware_auto_sync == true)
 end
 
 local function checkNetworkAndConfig()
@@ -112,6 +120,15 @@ function AskGPT:init()
       end)
     end)
   end
+
+  if autoSyncEnabled() then
+    UIManager:scheduleIn(2, function()
+      if not checkNetworkAndConfig() then return end
+      NetworkMgr:runWhenOnline(function()
+        BookSync.sync_all(self.ui)
+      end)
+    end)
+  end
 end
 
 -- AskGPT 入口：统一放到 Tools/工具 菜单下的 AskGPT 子菜单
@@ -144,6 +161,16 @@ function AskGPT:addToMainMenu(menu_items)
       end,
     })
   end
+
+  table.insert(askgpt_items, {
+    text = _("Book-Aware book sync"),
+    callback = function()
+      if not checkNetworkAndConfig() then return end
+      NetworkMgr:runWhenOnline(function()
+        BookSync.show(self.ui)
+      end)
+    end,
+  })
 
   table.insert(askgpt_items, {
     text = _("检查 AskGPT 更新"),

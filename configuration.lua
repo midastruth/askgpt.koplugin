@@ -23,12 +23,14 @@ return {
   reader_ai_query_path = "/ai/query",
   reader_ai_import_epub_path = "/books/import/epub",
   reader_ai_books_path = "/books",
+  reader_ai_book_download_path = "/epub",
 
   ---------------------------------------------------------------------------
   -- 可选：Book-Aware 超时（秒）。上传 EPUB 可能较慢，避免 LuaSec wantread 超时。
   ---------------------------------------------------------------------------
   reader_ai_book_lookup_timeout = 30,
   reader_ai_import_epub_timeout = 300,
+  reader_ai_book_download_timeout = 300,
 
   ---------------------------------------------------------------------------
   -- 可选：语言设置
@@ -49,4 +51,13 @@ return {
   ---------------------------------------------------------------------------
   -- 如果你不确定后端是否支持，建议保持 false。
   reader_ai_auto_upload_book = false,
+
+  ---------------------------------------------------------------------------
+  -- 可选：从 Book-Aware 后端同步 EPUB 到 KOReader 本地目录
+  ---------------------------------------------------------------------------
+  -- 菜单路径：Tools/工具 → AskGPT → Book-Aware book sync
+  -- 打开后会显示书籍同步界面，可选择单本或同步全部。
+  -- 不填 reader_ai_sync_dir 时，默认同步到当前书籍所在目录或 KOReader 最近目录。
+  -- reader_ai_sync_dir = "/mnt/onboard/Books",
+  reader_ai_auto_sync_books = false,
 }

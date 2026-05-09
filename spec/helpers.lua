@@ -177,7 +177,10 @@ function H.mock_koreader()
 
   -- ltn12, socket stubs (needed by ai_client but not exercised here)
   package.loaded["ltn12"] = {
-    sink   = { table  = function(t) return function(c) if c then table.insert(t,c) end end end },
+    sink   = {
+      table = function(t) return function(c) if c then table.insert(t,c) end end end,
+      file  = function(f) return function(c) if c then f:write(c) else f:close() end return 1 end end,
+    },
     source = { string = function(s) local d=false; return function() if not d then d=true; return s end end end },
   }
   package.loaded["socket"]      = { sleep = function() end }

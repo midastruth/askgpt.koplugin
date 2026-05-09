@@ -12,13 +12,15 @@ local Config = require("askgpt.config")
 local REQUEST_TIMEOUT          = 10   -- 秒
 local BOOK_LOOKUP_TIMEOUT      = 30   -- 秒
 local IMPORT_EPUB_TIMEOUT      = 300  -- 秒：EPUB 上传/后端导入可能较慢
+local BOOK_DOWNLOAD_TIMEOUT    = 300  -- 秒：从后端同步 EPUB 可能较慢
 local MAX_RETRY_ATTEMPTS       = 3
 local RETRY_DELAY              = 2    -- 秒
 
-local DEFAULT_READ_PATH        = "/ai/query"
-local DEFAULT_ASK_STREAM_PATH  = "/ai/query/stream"
-local DEFAULT_IMPORT_EPUB_PATH = "/books/import/epub"
-local DEFAULT_BOOKS_PATH       = "/books"
+local DEFAULT_READ_PATH          = "/ai/query"
+local DEFAULT_ASK_STREAM_PATH    = "/ai/query/stream"
+local DEFAULT_IMPORT_EPUB_PATH   = "/books/import/epub"
+local DEFAULT_BOOKS_PATH         = "/books"
+local DEFAULT_BOOK_DOWNLOAD_PATH = "/epub"
 
 local AiClient = {}
 AiClient.MAX_RETRY_ATTEMPTS = MAX_RETRY_ATTEMPTS  -- 供外部错误提示引用
@@ -191,10 +193,19 @@ local function url_encode(value)
   end)
 end
 
+local function resolve_books_endpoint()
+  return resolve_service_base_url() .. normalize_path(pick_config_path("reader_ai_books_path") or DEFAULT_BOOKS_PATH)
+end
+
 local function resolve_book_lookup_endpoint(sha256)
   local path = normalize_path(pick_config_path("reader_ai_books_path") or DEFAULT_BOOKS_PATH)
   if path:sub(-1) == "/" then path = path:sub(1, -2) end
   return resolve_service_base_url() .. path .. "/" .. url_encode(sha256)
+end
+
+local function resolve_book_download_endpoint(sha256)
+  local suffix = normalize_path(pick_config_path("reader_ai_book_download_path") or DEFAULT_BOOK_DOWNLOAD_PATH)
+  return resolve_book_lookup_endpoint(sha256) .. suffix
 end
 
 local function resolve_book_lookup_timeout()
@@ -209,6 +220,12 @@ local function resolve_import_epub_timeout()
       or pick_config_number("reader_ai_upload_timeout")
       or pick_config_number("book_aware_upload_timeout")
       or IMPORT_EPUB_TIMEOUT
+end
+
+local function resolve_book_download_timeout()
+  return pick_config_number("reader_ai_book_download_timeout")
+      or pick_config_number("book_aware_download_timeout")
+      or BOOK_DOWNLOAD_TIMEOUT
 end
 
 local function has_values(t)
@@ -321,6 +338,18 @@ local function http_request_with_retry(request_params, timeout)
   return false, nil, last_error
 end
 
+local function decode_json_response(context_label, response_chunks)
+  if type(response_chunks) ~= "table" then
+    error(string.format("%s backend returned an invalid response buffer.", context_label))
+  end
+  local response_body = table.concat(response_chunks)
+  local ok, decoded = pcall(json.decode, response_body)
+  if not ok then
+    error(string.format("Failed to decode %s response: %s", context_label, response_body))
+  end
+  return decoded, response_body
+end
+
 local function perform_json_post(endpoint, payload, context_label, timeout)
   local body = json.encode(payload)
   local payload_hint = upload_payload_hint(context_label, body)
@@ -351,21 +380,37 @@ local function perform_json_post(endpoint, payload, context_label, timeout)
     ))
   end
 
-  if type(response_chunks) ~= "table" then
-    error(string.format("%s backend returned an invalid response buffer.", context_label))
-  end
-  local response_body = table.concat(response_chunks)
   if status_code ~= 200 then
     error(string.format(
-      "%s backend error (%s): %s", context_label, tostring(status_code), response_body
+      "%s backend error (%s): %s", context_label, tostring(status_code), table.concat(response_chunks or {})
     ))
   end
 
-  local ok, decoded = pcall(json.decode, response_body)
-  if not ok then
-    error(string.format("Failed to decode %s response: %s", context_label, response_body))
+  return decode_json_response(context_label, response_chunks)
+end
+
+local function perform_json_get(endpoint, context_label, timeout)
+  local success, status_code, response_chunks = http_request_with_retry({
+    url     = endpoint,
+    method  = "GET",
+    headers = { ["Accept"] = "application/json" },
+  }, timeout)
+
+  if not success then
+    if status_code then
+      local friendly = extract_error_detail(response_chunks) or tostring(response_chunks or "")
+      error(string.format(
+        "%s backend returned HTTP %s: %s",
+        context_label, tostring(status_code), friendly ~= "" and friendly or "unknown error"
+      ))
+    end
+    error(string.format(
+      "Failed to contact %s backend after %d attempts. Last error: %s",
+      context_label, MAX_RETRY_ATTEMPTS, tostring(response_chunks)
+    ))
   end
-  return decoded, response_body
+
+  return decode_json_response(context_label, response_chunks)
 end
 
 -- ── 公开 API ─────────────────────────────────────────────────────────────
@@ -384,7 +429,7 @@ function AiClient.dictionaryLookup(params)
   }
   add_read_metadata(payload, params)
 
-  local decoded = perform_json_post(ep, payload, "Reader AI dictionary", 90)
+  local decoded = perform_json_post(ep, payload, "Reader AI dictionary")
   if type(decoded) ~= "table" then
     error("Reader AI dictionary response did not contain a JSON object.")
   end
@@ -452,6 +497,126 @@ function AiClient.analyzeContent(params)
     error("Reader AI analyze response did not contain a JSON object.")
   end
   return decoded
+end
+
+function AiClient.listBooks()
+  local decoded = perform_json_get(resolve_books_endpoint(), "Book-Aware books list", resolve_book_lookup_timeout())
+  if type(decoded) ~= "table" then
+    error("Book-Aware books list response did not contain a JSON object.")
+  end
+  return decoded
+end
+
+function AiClient.downloadBook(sha256, local_path)
+  sha256 = Util.trim(sha256 or "")
+  if sha256 == "" then error("Book-Aware book download requires sha256.") end
+  if type(local_path) ~= "string" or local_path == "" then
+    error("Book-Aware book download requires local_path.")
+  end
+
+  local endpoint = resolve_book_download_endpoint(sha256)
+  local lib = choose_lib(endpoint)
+  local attempts = 0
+  local last_error, last_status_code, last_status_line
+
+  while attempts < MAX_RETRY_ATTEMPTS do
+    attempts = attempts + 1
+    local file, open_err = io.open(local_path, "wb")
+    if not file then error("Cannot open download target: " .. tostring(open_err)) end
+
+    local closed = false
+    local write_error = nil
+    local function close_file()
+      if closed then return end
+      local ok_close, close_result, close_err = pcall(function()
+        return file:close()
+      end)
+      closed = true
+      if not ok_close then
+        write_error = write_error or ("close failed: " .. tostring(close_result))
+      elseif close_result == nil or close_result == false then
+        write_error = write_error or ("close failed: " .. tostring(close_err or "unknown error"))
+      end
+    end
+    local sink = function(chunk)
+      if write_error then return nil, write_error end
+      if chunk then
+        local ok_write, write_result, write_err = pcall(function()
+          return file:write(chunk)
+        end)
+        if not ok_write then
+          write_error = "write failed: " .. tostring(write_result)
+          close_file()
+          return nil, write_error
+        elseif not write_result then
+          write_error = "write failed: " .. tostring(write_err or "unknown error")
+          close_file()
+          return nil, write_error
+        end
+      else
+        close_file()
+      end
+      return 1
+    end
+
+    local prev_http_timeout  = http.TIMEOUT
+    local prev_https_timeout = https.TIMEOUT
+    http.TIMEOUT  = resolve_book_download_timeout()
+    https.TIMEOUT = resolve_book_download_timeout()
+
+    local success, res, code, headers, status_line = pcall(function()
+      return lib.request({
+        url     = endpoint,
+        method  = "GET",
+        headers = { ["Accept"] = "application/epub+zip,*/*" },
+        sink    = sink,
+      })
+    end)
+
+    close_file()
+    http.TIMEOUT  = prev_http_timeout
+    https.TIMEOUT = prev_https_timeout
+
+    if write_error then
+      os.remove(local_path)
+      error("Book-Aware book download failed while writing local file: " .. tostring(write_error))
+    end
+
+    local status_code = tonumber(code)
+    if success and res and status_code == 200 then
+      return true, headers
+    end
+
+    os.remove(local_path)
+    if success and status_code then
+      last_status_code = status_code
+      last_status_line = status_line or ""
+      break
+    elseif not success then
+      last_error = "Request failed: " .. tostring(res)
+    elseif not res then
+      local transport_error = code or status_line
+      if transport_error ~= nil and tostring(transport_error) ~= "" then
+        last_error = "Connection failed: " .. tostring(transport_error)
+      else
+        last_error = "Connection failed"
+      end
+    else
+      last_error = "HTTP error: " .. tostring(code)
+    end
+    if attempts < MAX_RETRY_ATTEMPTS then socket.sleep(RETRY_DELAY) end
+  end
+
+  if last_status_code then
+    error(string.format(
+      "Book-Aware book download returned HTTP %s: %s",
+      tostring(last_status_code), last_status_line ~= "" and last_status_line or "unknown error"
+    ))
+  end
+  error(string.format(
+    "Failed to download Book-Aware book after %d attempts. Last error: %s",
+    MAX_RETRY_ATTEMPTS, tostring(last_error)
+  ))
 end
 
 function AiClient.getBook(sha256)

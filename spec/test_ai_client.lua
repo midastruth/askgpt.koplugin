@@ -41,7 +41,10 @@ local function load_ai_client(config)
   package.loaded["ssl.https"]   = https_lib
   package.loaded["socket"]      = { sleep = function() end }
   package.loaded["ltn12"] = {
-    sink   = { table  = function(t) return function(c) if c then table.insert(t, c) end return 1 end end },
+    sink   = {
+      table = function(t) return function(c) if c then table.insert(t, c) end return 1 end end,
+      file  = function(f) return function(c) if c then f:write(c) else f:close() end return 1 end end,
+    },
     source = { string = function(s) local d=false return function() if not d then d=true return s end end end },
   }
   package.loaded["json"] = {
@@ -115,6 +118,17 @@ do
   H.eq("importEpub uses 300s timeout", last_https_timeout, 300)
 end
 
+-- Backend EPUB download gets a long timeout too.
+do
+  make_libs()
+  for _ = 1, 3 do request_results[#request_results+1] = {nil, nil, nil} end
+  last_https_timeout = nil
+  local AiClient = load_ai_client()
+  pcall(AiClient.downloadBook, "abc123", "/tmp/askgpt-test-download.epub")
+  os.remove("/tmp/askgpt-test-download.epub")
+  H.eq("downloadBook uses 300s timeout", last_https_timeout, 300)
+end
+
 -- EPUB import timeout can be overridden by configuration.
 do
   make_libs()
@@ -175,6 +189,92 @@ do
   local ok, result = pcall(AiClient.analyzeContent, { content = "test" })
   H.is_true("analyzeContent succeeds on HTTP 200", ok)
   H.is_true("analyzeContent returns a table", type(result) == "table")
+end
+
+-- listBooks returns the decoded backend object.
+do
+  make_libs()
+  request_results = { {1, 200, {}} }
+  local AiClient = load_ai_client()
+  package.loaded["json"].decode = function() return { ok = true, books = { { sha256 = "abc123" } } } end
+  local ok, result = pcall(AiClient.listBooks)
+  H.is_true("listBooks succeeds on HTTP 200", ok)
+  H.eq("listBooks decodes books", #result.books, 1)
+end
+
+-- downloadBook must fail loudly if the local file write fails, even if the
+-- HTTP layer would otherwise report 200.
+do
+  local target = "/tmp/askgpt-write-fail.epub"
+  local removed = {}
+  local original_io_open = io.open
+  local original_os_remove = os.remove
+  http_lib = { TIMEOUT = 10, request = function(_) return nil, nil, nil end }
+  https_lib = {
+    TIMEOUT = 10,
+    request = function(params)
+      last_https_timeout = https_lib.TIMEOUT
+      params.sink("partial epub bytes")
+      return 1, 200, {}
+    end,
+  }
+  io.open = function(path, mode)
+    if path == target and mode == "wb" then
+      return {
+        write = function() return nil, "disk full" end,
+        close = function() return true end,
+      }
+    end
+    return original_io_open(path, mode)
+  end
+  os.remove = function(path)
+    table.insert(removed, path)
+    return true
+  end
+  local AiClient = load_ai_client()
+  local ok, err = pcall(AiClient.downloadBook, "abc123", target)
+  io.open = original_io_open
+  os.remove = original_os_remove
+  H.is_false("downloadBook rejects local write failure", ok)
+  H.contains("downloadBook write failure mentions local file", tostring(err), "writing local file")
+  H.contains("downloadBook write failure preserves detail", tostring(err), "disk full")
+  H.eq("downloadBook removes partial file after write failure", removed[1], target)
+end
+
+-- downloadBook also treats close/flush failure as a failed local write.
+do
+  local target = "/tmp/askgpt-close-fail.epub"
+  local removed = {}
+  local original_io_open = io.open
+  local original_os_remove = os.remove
+  http_lib = { TIMEOUT = 10, request = function(_) return nil, nil, nil end }
+  https_lib = {
+    TIMEOUT = 10,
+    request = function(params)
+      params.sink("epub bytes")
+      return 1, 200, {}
+    end,
+  }
+  io.open = function(path, mode)
+    if path == target and mode == "wb" then
+      return {
+        write = function(self) return self end,
+        close = function() return nil, "flush failed" end,
+      }
+    end
+    return original_io_open(path, mode)
+  end
+  os.remove = function(path)
+    table.insert(removed, path)
+    return true
+  end
+  local AiClient = load_ai_client()
+  local ok, err = pcall(AiClient.downloadBook, "abc123", target)
+  io.open = original_io_open
+  os.remove = original_os_remove
+  H.is_false("downloadBook rejects local close failure", ok)
+  H.contains("downloadBook close failure preserves detail", tostring(err), "flush failed")
+  H.eq("downloadBook removes partial file after close failure", removed[1], target)
 end
 
 -- ── Section 5: input validation ───────────────────────────────────────────
