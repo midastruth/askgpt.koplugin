@@ -60,4 +60,12 @@ return {
   -- 不填 reader_ai_sync_dir 时，默认同步到当前书籍所在目录或 KOReader 最近目录。
   -- reader_ai_sync_dir = "/mnt/onboard/Books",
   reader_ai_auto_sync_books = false,
+
+  ---------------------------------------------------------------------------
+  -- 可选：Web 高亮自动同步
+  -- true  = 打开书时自动 sync（pull pending + push 本地改动 + 应用删除），
+  --         关闭书时自动 push 本地 note/color 改动回 book-aware。
+  -- false = 只通过菜单 "Sync web highlights" 手动触发（默认，安全起见）。
+  ---------------------------------------------------------------------------
+  auto_sync_web_highlights = false,
 }

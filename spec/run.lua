@@ -23,6 +23,8 @@ local specs = {
   "spec.test_workflow",
   "spec.test_background_jobs",
   "spec.test_ai_client",
+  "spec.test_annotation_sync",
+  "spec.test_auto_sync",
 }
 
 for _, spec in ipairs(specs) do

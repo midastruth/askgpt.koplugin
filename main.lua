@@ -11,6 +11,7 @@ local BackgroundJobs   = require("askgpt.background_jobs")
 local BookUpload       = require("askgpt.book_upload")
 local BookSync         = require("askgpt.book_sync")
 local UpdateChecker    = require("update_checker")
+local AnnotationSync   = require("askgpt.annotation_sync")
 
 local AskGPT = InputContainer:new {
   name        = "askgpt",
@@ -35,6 +36,11 @@ local function autoSyncEnabled()
   return type(cfg) == "table"
       and (cfg.reader_ai_auto_sync_books == true
            or cfg.book_aware_auto_sync == true)
+end
+
+local function autoSyncWebHighlightsEnabled()
+  local cfg = Config.get()
+  return type(cfg) == "table" and cfg.auto_sync_web_highlights == true
 end
 
 local function placeAskGPTBeforeToc()
@@ -152,6 +158,43 @@ function AskGPT:init()
       end)
     end)
   end
+
+  if autoSyncWebHighlightsEnabled() then
+    UIManager:scheduleIn(3, function()
+      if self._auto_synced_sha then return end
+      local cfg_ok = Config.validate()
+      if not cfg_ok then return end
+      NetworkMgr:runWhenOnline(function()
+        if self._auto_synced_sha then return end
+        self._auto_synced_sha = true
+        local ok, err = pcall(AnnotationSync.sync, self.ui)
+        if not ok then
+          print("[book-aware] auto sync web highlights failed: " .. tostring(err))
+        end
+      end)
+    end)
+  end
+end
+
+-- Push local note/color changes during save/close (silent, best-effort).
+local function pushWebHighlightChanges(self, reason)
+  if not autoSyncWebHighlightsEnabled() then return end
+  if isFileManagerUI(self.ui) then return end
+  local cfg_ok = Config.validate()
+  if not cfg_ok then return end
+  if not NetworkMgr:isOnline() then return end
+  local ok, err = pcall(AnnotationSync.push_changes_only, self.ui)
+  if not ok then
+    print("[book-aware] auto push on " .. tostring(reason) .. " failed: " .. tostring(err))
+  end
+end
+
+function AskGPT:onSaveSettings()
+  pushWebHighlightChanges(self, "save")
+end
+
+function AskGPT:onCloseDocument()
+  pushWebHighlightChanges(self, "close")
 end
 
 -- AskGPT 入口：阅读器中放到 Navigation/导航 菜单的目录上方；文件管理器中仍放到 Tools/工具。
@@ -194,6 +237,77 @@ function AskGPT:addToMainMenu(menu_items)
       end)
     end,
   })
+
+  if not isFileManagerUI(self.ui) then
+    table.insert(askgpt_items, {
+      text = _("Sync web highlights"),
+      callback = function()
+        if not checkNetworkAndConfig() then return end
+        NetworkMgr:runWhenOnline(function()
+          UIManager:show(InfoMessage:new {
+            text    = _("正在同步 Web 高亮..."),
+            timeout = 1,
+          })
+          local ok, result = pcall(AnnotationSync.sync, self.ui)
+          if not ok then
+            UIManager:show(InfoMessage:new {
+              text    = _("Web 高亮同步失败：") .. tostring(result),
+              timeout = 8,
+            })
+          else
+            UIManager:show(InfoMessage:new {
+              text = string.format(
+                _("Web 高亮同步完成。\n同步：%d  推送：%d  删除：%d\n冲突：%d  失败：%d"),
+                result.resolved, result.pushed or 0, result.removed or 0,
+                result.conflict, result.failed
+              ),
+              timeout = (result.failed or 0) > 0 and 8 or 5,
+            })
+          end
+        end)
+      end,
+    })
+  end
+
+  if not isFileManagerUI(self.ui) then
+    table.insert(askgpt_items, {
+      text = _("View conflict highlights"),
+      callback = function()
+        if not checkNetworkAndConfig() then return end
+        NetworkMgr:runWhenOnline(function()
+          local ok, data = pcall(AnnotationSync.list_conflicts, self.ui)
+          if not ok then
+            UIManager:show(InfoMessage:new {
+              text    = _("无法获取冲突高亮：") .. tostring(data),
+              timeout = 6,
+            })
+            return
+          end
+          if #data == 0 then
+            UIManager:show(InfoMessage:new {
+              text    = _("无冲突高亮。"),
+              timeout = 3,
+            })
+            return
+          end
+          local lines = {}
+          for i, hl in ipairs(data) do
+            local excerpt = (type(hl.exact) == "string" and #hl.exact > 0)
+              and hl.exact:sub(1, 60) or "?"
+            local err = (hl.koreader and type(hl.koreader.error) == "string")
+              and hl.koreader.error:sub(1, 120) or ""
+            table.insert(lines, string.format(
+              "%d. \"%s\"\n   %s", i, excerpt, err))
+          end
+          UIManager:show(InfoMessage:new {
+            text = string.format(
+              _("冲突高亮（%d）：\n\n%s"), #data, table.concat(lines, "\n\n")),
+            timeout = 15,
+          })
+        end)
+      end,
+    })
+  end
 
   table.insert(askgpt_items, {
     text = _("检查 AskGPT 更新"),

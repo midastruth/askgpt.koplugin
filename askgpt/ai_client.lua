@@ -861,6 +861,81 @@ function AiClient.importEpub(params)
   return decoded
 end
 
+-- ── Highlight Sync API ────────────────────────────────────────────────────
+
+local function resolve_highlights_endpoint(sha256)
+  local path = normalize_path(pick_config_path("reader_ai_books_path") or DEFAULT_BOOKS_PATH)
+  if path:sub(-1) == "/" then path = path:sub(1, -2) end
+  return resolve_service_base_url() .. path .. "/" .. url_encode(sha256) .. "/highlights"
+end
+
+local function resolve_highlight_endpoint(sha256, id)
+  return resolve_highlights_endpoint(sha256) .. "/" .. url_encode(id)
+end
+
+local function perform_json_method(method, endpoint, payload, context_label, timeout)
+  local body = payload ~= nil and json.encode(payload) or ""
+  local headers = { ["Accept"] = "application/json" }
+  if body ~= "" then
+    headers["Content-Type"]   = "application/json"
+    headers["Content-Length"] = tostring(#body)
+  end
+  local success, status_code, response_chunks = http_request_with_retry({
+    url     = endpoint,
+    method  = method,
+    headers = headers,
+    source  = body ~= "" and ltn12.source.string(body) or nil,
+  }, timeout)
+
+  if not success then
+    if status_code then
+      local friendly = extract_error_detail(response_chunks) or tostring(response_chunks or "")
+      error(string.format(
+        "%s returned HTTP %s: %s", context_label, tostring(status_code),
+        friendly ~= "" and friendly or "unknown error"
+      ))
+    end
+    error(string.format(
+      "Failed to contact %s after %d attempts. Last error: %s",
+      context_label, MAX_RETRY_ATTEMPTS, tostring(response_chunks)
+    ))
+  end
+
+  -- Accept any 2xx status as success
+  if status_code and (tonumber(status_code) or 0) >= 300 then
+    error(string.format(
+      "%s error (%s): %s", context_label, tostring(status_code), table.concat(response_chunks or {})
+    ))
+  end
+
+  return decode_json_response(context_label, response_chunks)
+end
+
+function AiClient.listHighlights(sha256, status_filter, include_deleted)
+  sha256 = Util.trim(sha256 or "")
+  if sha256 == "" then error("listHighlights requires sha256.") end
+  local endpoint = resolve_highlights_endpoint(sha256)
+  local params = {}
+  if type(status_filter) == "string" and status_filter ~= "" then
+    table.insert(params, "status=" .. url_encode(status_filter))
+  end
+  if include_deleted then
+    table.insert(params, "include_deleted=1")
+  end
+  if #params > 0 then
+    endpoint = endpoint .. "?" .. table.concat(params, "&")
+  end
+  return perform_json_get(endpoint, "Book-Aware highlights list", resolve_book_lookup_timeout())
+end
+
+function AiClient.updateHighlight(sha256, id, patch)
+  sha256 = Util.trim(sha256 or "")
+  id     = Util.trim(id or "")
+  if sha256 == "" or id == "" then error("updateHighlight requires sha256 and id.") end
+  local endpoint = resolve_highlight_endpoint(sha256, id)
+  return perform_json_method("PATCH", endpoint, patch, "Book-Aware highlight update", resolve_book_lookup_timeout())
+end
+
 -- ── SSE 流式 Ask ─────────────────────────────────────────────────────────
 -- 在子进程中调用；把增量文字和最终结果写入 tmpfile，供主进程轮询。
 -- 写入格式：

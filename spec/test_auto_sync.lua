@@ -1,0 +1,181 @@
+-- Tests for automatic web highlight sync lifecycle (Phase 4 auto-sync)
+-- Tests main.lua: auto-sync on open, push-only on close, FileManager guard.
+
+local H = require("spec.helpers")
+H.section("G. auto sync lifecycle (main.lua)")
+
+local SHA = string.rep("c", 64)
+
+-- Build a minimal reader UI (not FileManager).
+local function make_reader_ui()
+  return {
+    menu = { registerToMainMenu = function() end },
+    highlight = {
+      addToHighlightDialog = function() end,
+    },
+    document = { file = "/fake/book.epub" },
+    annotation = { annotations = {} },
+    doc_settings = {
+      readSetting = function(_, k) return k == "file_sha256" and SHA or nil end,
+      saveSetting = function() end,
+    },
+    rolling = true,
+    handleEvent = function() end,
+  }
+end
+
+-- Shared stubs required by every main.lua load.
+local function setup_stubs(sync_calls, push_calls, cfg_override)
+  package.loaded["askgpt.dialog_controller"] = { show = function() end }
+  package.loaded["askgpt.background_jobs"]   = {
+    submit_summary    = function() end,
+    submit_analyze    = function() end,
+    show_results_menu = function() end,
+  }
+  package.loaded["askgpt.book_upload"] = {
+    upload_current = function() end,
+    upload_file    = function() end,
+  }
+  package.loaded["askgpt.book_sync"] = { sync_all = function() end }
+  package.loaded["askgpt.annotation_sync"] = {
+    sync = function(_ui)
+      table.insert(sync_calls, true)
+      return { resolved = 0, conflict = 0, failed = 0, pushed = 0, removed = 0 }
+    end,
+    push_changes_only = function(_ui)
+      table.insert(push_calls, true)
+      return { pushed = 0, failed = 0 }
+    end,
+    list_conflicts = function() return {} end,
+  }
+  package.loaded["askgpt.config"] = {
+    validate = function() return true, {} end,
+    get      = function() return cfg_override or {} end,
+  }
+  package.loaded["ui/elements/reader_menu_order"] = {
+    navi = { "table_of_contents", "bookmarks" },
+  }
+end
+
+-- ── T-AS1: auto_sync_web_highlights=false → sync NOT triggered on open ─────
+
+do
+  local spy = H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls = {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_sync_web_highlights = false })
+
+  local AskGPT   = require("main")
+  local fake_self = { ui = make_reader_ui() }
+  AskGPT.init(fake_self)
+
+  for _, s in ipairs(spy.scheduled) do s.fn() end
+
+  H.eq("T-AS1 config=false: sync not triggered on open", #sync_calls, 0)
+end
+
+-- ── T-AS2: config=true + reader UI → sync called once on open ─────────────
+
+do
+  local spy = H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls = {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_sync_web_highlights = true })
+
+  local AskGPT    = require("main")
+  local fake_self = { ui = make_reader_ui() }
+  AskGPT.init(fake_self)
+
+  for _, s in ipairs(spy.scheduled) do s.fn() end
+
+  H.eq("T-AS2 config=true reader: sync called once on open", #sync_calls, 1)
+end
+
+-- ── T-AS3: FileManager context → sync NOT triggered even with config=true ──
+
+do
+  local spy = H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls = {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_sync_web_highlights = true })
+
+  local AskGPT    = require("main")
+  local fake_fm   = {
+    ui = {
+      menu                 = { registerToMainMenu = function() end },
+      addFileDialogButtons = function() end,
+    }
+  }
+  AskGPT.init(fake_fm)
+
+  for _, s in ipairs(spy.scheduled) do s.fn() end
+
+  H.eq("T-AS3 FileManager: sync not triggered", #sync_calls, 0)
+end
+
+-- ── T-AS4: config=true → onCloseDocument triggers push_changes_only ────────
+
+do
+  H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls = {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_sync_web_highlights = true })
+
+  local AskGPT    = require("main")
+  local fake_self = { ui = make_reader_ui() }
+
+  H.no_error("T-AS4 onCloseDocument runs without error", function()
+    AskGPT.onCloseDocument(fake_self)
+  end)
+  H.eq("T-AS4 onCloseDocument triggers push_changes_only", #push_calls, 1)
+end
+
+-- ── T-AS5: config=false → onCloseDocument does NOT push ───────────────────
+
+do
+  H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls = {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_sync_web_highlights = false })
+
+  local AskGPT    = require("main")
+  local fake_self = { ui = make_reader_ui() }
+  AskGPT.onCloseDocument(fake_self)
+
+  H.eq("T-AS5 config=false: onCloseDocument does not push", #push_calls, 0)
+end
+
+-- ── T-AS6: config=true → onSaveSettings triggers push_changes_only ────────
+
+do
+  H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls = {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_sync_web_highlights = true })
+
+  local AskGPT    = require("main")
+  local fake_self = { ui = make_reader_ui() }
+
+  H.no_error("T-AS6 onSaveSettings runs without error", function()
+    AskGPT.onSaveSettings(fake_self)
+  end)
+  H.eq("T-AS6 onSaveSettings triggers push_changes_only", #push_calls, 1)
+end

@@ -6,7 +6,8 @@ local spy = H.mock_koreader()
 
 -- Provide stub modules that main.lua requires
 H.reset("main", "askgpt.config", "askgpt.dialog_controller",
-        "askgpt.background_jobs", "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+        "askgpt.background_jobs", "askgpt.book_upload", "askgpt.book_sync",
+        "askgpt.annotation_sync", "update_checker")
 
 package.loaded["askgpt.config"] = {
   validate = function() return true, {} end,
@@ -24,6 +25,10 @@ package.loaded["askgpt.book_upload"] = {
 }
 package.loaded["askgpt.book_sync"] = {
   sync_all = function() end,
+}
+package.loaded["askgpt.annotation_sync"] = {
+  sync           = function() return { resolved = 0, conflict = 0, failed = 0 } end,
+  list_conflicts = function() return {} end,
 }
 package.loaded["ui/elements/reader_menu_order"] = {
   navi = { "table_of_contents", "bookmarks" },
@@ -136,15 +141,25 @@ H.eq("Table of contents follows AskGPT",
      package.loaded["ui/elements/reader_menu_order"].navi[2], "table_of_contents")
 H.is_true("AskGPT submenu has items",
           type(menu_items.askgpt.sub_item_table) == "table")
-H.eq("Reader AskGPT submenu has four items", #menu_items.askgpt.sub_item_table, 4)
+H.eq("Reader AskGPT submenu has six items", #menu_items.askgpt.sub_item_table, 6)
 H.is_true("Recent results item callback is a function",
           type(menu_items.askgpt.sub_item_table[1].callback) == "function")
 H.is_true("Upload current book item callback is a function",
           type(menu_items.askgpt.sub_item_table[2].callback) == "function")
 H.is_true("Sync books item callback is a function",
           type(menu_items.askgpt.sub_item_table[3].callback) == "function")
-H.is_true("Update item callback is a function",
+H.is_true("Sync web highlights item is present",
+          menu_items.askgpt.sub_item_table[4] ~= nil and
+          menu_items.askgpt.sub_item_table[4].text == "Sync web highlights")
+H.is_true("Sync web highlights item callback is a function",
           type(menu_items.askgpt.sub_item_table[4].callback) == "function")
+H.is_true("View conflict highlights item is present",
+          menu_items.askgpt.sub_item_table[5] ~= nil and
+          menu_items.askgpt.sub_item_table[5].text == "View conflict highlights")
+H.is_true("View conflict highlights item callback is a function",
+          type(menu_items.askgpt.sub_item_table[5].callback) == "function")
+H.is_true("Update item callback is a function",
+          type(menu_items.askgpt.sub_item_table[6].callback) == "function")
 
 -- Recent Results callback must not crash KOReader if the result dialog fails.
 H.reset("main")
