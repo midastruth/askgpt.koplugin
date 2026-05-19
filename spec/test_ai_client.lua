@@ -134,14 +134,14 @@ do
         if not chunk then break end
         seen_body = seen_body .. chunk
       end
-      return 1, 200, {}
+      return 1, 201, {}
     end,
   }
   local AiClient = load_ai_client()
   package.loaded["json"].decode = function() return { ok = true } end
   local ok = pcall(AiClient.importEpub, { filepath = "", path = tmp, filename = "book.epub", book = { sha256 = "abc" } })
   os.remove(tmp)
-  H.is_true("importEpub filepath succeeds", ok)
+  H.is_true("importEpub filepath succeeds on HTTP 201", ok)
   H.contains("importEpub filepath uses multipart", seen_content_type or "", "multipart/form-data")
   H.contains("importEpub multipart has epub field", seen_body, "name=\"epub\"; filename=\"book.epub\"")
   H.contains("importEpub multipart streams file bytes", seen_body, "EPUBDATA")
@@ -273,6 +273,25 @@ do
   local ok, result = pcall(AiClient.listBooks)
   H.is_true("listBooks succeeds on HTTP 200", ok)
   H.eq("listBooks decodes books", #result.books, 1)
+end
+
+-- Backend create/import endpoints may legitimately return 201 Created.
+do
+  make_libs()
+  request_results = { {1, 201, {}} }
+  local AiClient = load_ai_client()
+  package.loaded["json"].decode = function() return { ok = true } end
+  local ok = pcall(AiClient.importEpub, { content_base64 = "YWJj" })
+  H.is_true("importEpub succeeds on HTTP 201", ok)
+end
+
+do
+  make_libs()
+  request_results = { {1, 201, {}} }
+  local AiClient = load_ai_client()
+  package.loaded["json"].decode = function() return { highlight = { id = "h1" } } end
+  local ok = pcall(AiClient.createHighlight, "abc123", { exact = "hello" })
+  H.is_true("createHighlight succeeds on HTTP 201", ok)
 end
 
 -- downloadBook must fail loudly if the local file write fails, even if the

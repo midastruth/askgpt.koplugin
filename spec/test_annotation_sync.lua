@@ -20,12 +20,12 @@ local function reset_modules()
     -- (this matters for T17 retry stability and to avoid collisions in tests).
     sha256_string = function(data)
       local s = tostring(data or "")
-      -- FNV-1a 32-bit (simple, deterministic, no collisions on test inputs).
-      -- LuaJIT 2.1 lacks infix bitwise ops; use the bit library.
-      local bxor = bit.bxor
-      local hash = 2166136261
+      -- Simple deterministic 32-bit rolling hash. Keep this pure arithmetic
+      -- so the spec runs under both LuaJIT (KOReader) and stock Lua, where
+      -- the global `bit` module may not exist.
+      local hash = 5381
       for i = 1, #s do
-        hash = bxor(hash, s:byte(i)) * 16777619 % 4294967296
+        hash = (hash * 33 + s:byte(i)) % 4294967296
       end
       return string.format("%08x%08x%08x%08x", hash, hash, hash, hash)
     end,

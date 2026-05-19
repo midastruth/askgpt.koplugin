@@ -268,6 +268,11 @@ end
 
 -- ── HTTP 请求 ─────────────────────────────────────────────────────────────
 
+local function is_success_status(status_code)
+  status_code = tonumber(status_code)
+  return status_code ~= nil and status_code >= 200 and status_code < 300
+end
+
 local function http_request_with_retry(request_params, timeout)
   timeout = timeout or REQUEST_TIMEOUT
   local lib = choose_lib(request_params.url)
@@ -330,7 +335,7 @@ local function http_request_with_retry(request_params, timeout)
     -- not HTTP status codes and must be treated as retryable connection
     -- failures instead of being reported as "HTTP wantread".
     local status_code = tonumber(code)
-    if success and res and status_code == 200 then
+    if success and res and is_success_status(status_code) then
       return true, status_code, response_chunks
     end
 
@@ -415,7 +420,7 @@ local function perform_json_post(endpoint, payload, context_label, timeout)
     ))
   end
 
-  if status_code ~= 200 then
+  if not is_success_status(status_code) then
     error(string.format(
       "%s backend error (%s): %s", context_label, tostring(status_code), table.concat(response_chunks or {})
     ))
