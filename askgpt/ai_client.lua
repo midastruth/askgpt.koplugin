@@ -936,6 +936,31 @@ function AiClient.updateHighlight(sha256, id, patch)
   return perform_json_method("PATCH", endpoint, patch, "Book-Aware highlight update", resolve_book_lookup_timeout())
 end
 
+-- Create a new highlight in book-aware. Used by AnnotationSync.push_new_highlights
+-- to upload KOReader-originated highlights. The backend will use payload.client_id
+-- (when set) as an idempotency key, so retries after a partial network failure
+-- do not produce duplicates.
+function AiClient.createHighlight(sha256, payload)
+  sha256 = Util.trim(sha256 or "")
+  if sha256 == "" then error("createHighlight requires sha256.") end
+  if type(payload) ~= "table" then error("createHighlight requires a payload table.") end
+  local endpoint = resolve_highlights_endpoint(sha256)
+  return perform_json_method("POST", endpoint, payload, "Book-Aware highlight create", resolve_book_lookup_timeout())
+end
+
+-- Tombstone a highlight on the backend. `by` should be "koreader" so that the
+-- web client can distinguish the deletion origin (defaults to reader-web there).
+function AiClient.deleteHighlight(sha256, id, by)
+  sha256 = Util.trim(sha256 or "")
+  id     = Util.trim(id or "")
+  if sha256 == "" or id == "" then error("deleteHighlight requires sha256 and id.") end
+  local endpoint = resolve_highlight_endpoint(sha256, id)
+  if type(by) == "string" and by ~= "" then
+    endpoint = endpoint .. "?by=" .. url_encode(by)
+  end
+  return perform_json_method("DELETE", endpoint, nil, "Book-Aware highlight delete", resolve_book_lookup_timeout())
+end
+
 -- ── SSE 流式 Ask ─────────────────────────────────────────────────────────
 -- 在子进程中调用；把增量文字和最终结果写入 tmpfile，供主进程轮询。
 -- 写入格式：

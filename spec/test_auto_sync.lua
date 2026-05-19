@@ -25,7 +25,8 @@ local function make_reader_ui()
 end
 
 -- Shared stubs required by every main.lua load.
-local function setup_stubs(sync_calls, push_calls, cfg_override)
+local function setup_stubs(sync_calls, push_calls, cfg_override, push_new_calls)
+  push_new_calls = push_new_calls or {}
   package.loaded["askgpt.dialog_controller"] = { show = function() end }
   package.loaded["askgpt.background_jobs"]   = {
     submit_summary    = function() end,
@@ -45,6 +46,10 @@ local function setup_stubs(sync_calls, push_calls, cfg_override)
     push_changes_only = function(_ui)
       table.insert(push_calls, true)
       return { pushed = 0, failed = 0 }
+    end,
+    push_new_highlights_only = function(_ui)
+      table.insert(push_new_calls, true)
+      return { created = 1, failed = 0, errors = {} }
     end,
     list_conflicts = function() return {} end,
   }
@@ -178,4 +183,71 @@ do
     AskGPT.onSaveSettings(fake_self)
   end)
   H.eq("T-AS6 onSaveSettings triggers push_changes_only", #push_calls, 1)
+end
+
+-- ── T-AS7: new local highlight schedules push_new_highlights_only ─────────
+
+do
+  local spy = H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls, push_new_calls = {}, {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_upload_new_highlights = true }, push_new_calls)
+
+  local AskGPT    = require("main")
+  local fake_self = { ui = make_reader_ui() }
+
+  AskGPT.onAnnotationsModified(fake_self, {
+    { text = "local highlight", pos0 = "/p.0", pos1 = "/p.15" },
+    nb_highlights_added = 1,
+  })
+  H.eq("T-AS7 new highlight schedules one upload", #spy.scheduled, 1)
+  for _, s in ipairs(spy.scheduled) do s.fn() end
+  H.eq("T-AS7 scheduled upload calls push_new_highlights_only", #push_new_calls, 1)
+end
+
+-- ── T-AS8: web-created annotations are not re-uploaded ───────────────────
+
+do
+  local spy = H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls, push_new_calls = {}, {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_upload_new_highlights = true }, push_new_calls)
+
+  local AskGPT    = require("main")
+  local fake_self = { ui = make_reader_ui() }
+
+  AskGPT.onAnnotationsModified(fake_self, {
+    { text = "web highlight", bookaware_highlight_id = "hl-web" },
+    nb_highlights_added = 1,
+  })
+  H.eq("T-AS8 web highlight schedules no upload", #spy.scheduled, 0)
+  H.eq("T-AS8 web highlight does not call push_new", #push_new_calls, 0)
+end
+
+-- ── T-AS9: auto_sync_web_highlights=true also enables new-highlight upload ─
+
+do
+  local spy = H.mock_koreader()
+  H.reset("main", "askgpt.config", "askgpt.annotation_sync",
+          "askgpt.dialog_controller", "askgpt.background_jobs",
+          "askgpt.book_upload", "askgpt.book_sync", "update_checker")
+
+  local sync_calls, push_calls, push_new_calls = {}, {}, {}
+  setup_stubs(sync_calls, push_calls, { auto_sync_web_highlights = true }, push_new_calls)
+
+  local AskGPT    = require("main")
+  local fake_self = { ui = make_reader_ui() }
+
+  AskGPT.onAnnotationsModified(fake_self, {
+    { text = "local highlight", pos0 = "/p.0", pos1 = "/p.15" },
+    nb_highlights_added = 1,
+  })
+  for _, s in ipairs(spy.scheduled) do s.fn() end
+  H.eq("T-AS9 auto_sync enables new highlight upload", #push_new_calls, 1)
 end

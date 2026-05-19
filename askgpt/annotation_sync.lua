@@ -20,6 +20,7 @@
 
 local AiClient = require("askgpt.ai_client")
 local Util     = require("askgpt.util")
+local logger   = require("logger")
 
 local AnnotationSync = {}
 
@@ -225,12 +226,220 @@ local function get_sha256(ui)
   return nil
 end
 
--- ── Phase 3: push local changes to book-aware ────────────────────────────
+-- ── Phase 3: shared helpers ──────────────────────────────────────────────
+
+-- Number of words of context to grab on each side of a selection. KOReader
+-- itself uses 5 for translation context; the same magnitude is plenty for
+-- text-quote anchoring on the web side (~30-60 characters typically).
+local CONTEXT_WORDS = 5
+
+-- Extract `prefix` (text immediately before pos0) and `suffix` (text
+-- immediately after pos1) for a KOReader annotation. Returns ("", "") on
+-- failure — anchor-by-text on reader-web still works without context, just
+-- with lower precision, so this never raises.
+--
+-- IMPORTANT: pass `restore_selection=false` here, not true.
+--
+-- CreDocument:getSelectedWordContext's `restore_selection=true` branch calls
+-- getTextFromXPointers(pos0, pos1, true) which re-marks pos0..pos1 as the
+-- *current crengine selection* and draws it on the next refresh. In
+-- ReaderHighlight that is correct because pos0..pos1 *is* the user's live
+-- selection. Here we are iterating over historical annotations during a
+-- background sync; passing true would draw a blue selection rectangle on
+-- whichever annotation was processed last. Passing false is the right
+-- behaviour: we do not want to touch the on-screen selection at all.
+--
+-- The race the previous comment worried about (user mid-tap during auto-sync
+-- losing their selection) does happen, but the affected window is small and
+-- the alternative (always-on stray selection) is worse and more visible.
+local function extract_context(ui, pos0_xp, pos1_xp)
+  if not ui or not ui.document or type(ui.document.getSelectedWordContext) ~= "function" then
+    return "", ""
+  end
+  if type(pos0_xp) ~= "string" or type(pos1_xp) ~= "string" then
+    return "", ""
+  end
+  local ok, prev, nxt = pcall(
+    ui.document.getSelectedWordContext, ui.document,
+    "", CONTEXT_WORDS, pos0_xp, pos1_xp, false)
+  if not ok then return "", "" end
+  return type(prev) == "string" and prev or "",
+         type(nxt)  == "string" and nxt  or ""
+end
+
+-- Stable idempotency key for a local annotation. The key is derived from
+-- (sha256, pos0, pos1, exact) so that repeating the same POST after a network
+-- failure does not create duplicates on the backend.
+--
+-- Raises if SHA256 is unavailable (which would force a low-entropy fallback
+-- key whose collisions would silently de-duplicate distinct annotations on
+-- the backend). ffi/sha2 ships with every real KOReader build, so this is
+-- only expected to fire in broken environments and must be loud.
+local function make_client_id(sha256, ann)
+  local pos0 = type(ann.pos0) == "string" and ann.pos0 or ""
+  local pos1 = type(ann.pos1) == "string" and ann.pos1 or ""
+  local text = type(ann.text) == "string" and ann.text or ""
+  local payload = (sha256 or "") .. "|" .. pos0 .. "|" .. pos1 .. "|" .. text
+  local digest, err = Util.sha256_string(payload)
+  if type(digest) ~= "string" or digest == "" then
+    error("make_client_id: cannot derive idempotency key without SHA256: " .. tostring(err))
+  end
+  return "koreader-" .. digest:sub(1, 32)
+end
+
+-- Fetch the set of backend highlight IDs that have been tombstoned. Pulled
+-- once and shared between push_new / push_changes / apply_tombstones so a
+-- single sync round does not race against itself (e.g. PATCHing a record
+-- that is about to be tombstoned).
+local function fetch_deleted_ids(sha256)
+  local result = AiClient.listHighlights(sha256, nil, true)
+  local all_hls = (type(result) == "table" and type(result.highlights) == "table")
+    and result.highlights or {}
+  local deleted_ids = {}
+  for _, hl in ipairs(all_hls) do
+    if type(hl.id) == "string"
+        and type(hl.deleted_at) == "string" and hl.deleted_at ~= "" then
+      deleted_ids[hl.id] = true
+    end
+  end
+  return deleted_ids
+end
+
+-- ── Phase 3a: push new KOReader-originated highlights ─────────────────────
+
+-- Upload local annotations that have no bookaware_highlight_id yet. Only
+-- EPUB (rolling) annotations are eligible because reader-web/book-aware can
+-- only render text-quote anchors with XPointer positions.
+--
+-- On success the backend-assigned id and synced state are written back to
+-- the annotation so subsequent push_changes/apply_tombstones can recognise it.
+--
+-- Per-annotation failures are caught (so a single bad row does not abort the
+-- whole batch) but their details are logged via KOReader's logger and also
+-- propagated in the returned `errors` table for surfacing to the UI.
+--
+-- Note: re-creating a highlight that the user previously tombstoned on the
+-- web is intentionally allowed. The backend excludes deleted rows from
+-- client_id idempotency (see book-aware test "client_id reused after
+-- tombstone is treated as new highlight"), so a fresh row is created —
+-- which matches the user's intent of having a visible highlight again.
+local function push_new(ui, sha256)
+  if type(ui.annotation) ~= "table"
+      or type(ui.annotation.annotations) ~= "table" then
+    return { created = 0, failed = 0, errors = {} }
+  end
+  if not ui.rolling then
+    -- Without XPointer positions we cannot construct a usable anchor.
+    return { created = 0, failed = 0, errors = {} }
+  end
+
+  local created, failed = 0, 0
+  local errors = {}
+  for _, ann in ipairs(ui.annotation.annotations) do
+    local bid = type(ann.bookaware_highlight_id) == "string" and ann.bookaware_highlight_id or nil
+    -- Skip annotations that already have a backend id (handled by push_changes).
+    -- Also skip annotations missing the data we need to anchor remotely.
+    if not bid
+        and type(ann.text) == "string" and ann.text ~= ""
+        and type(ann.pos0) == "string" and type(ann.pos1) == "string"
+    then
+      local client_id_for_log
+      local ok_p, err = pcall(function()
+        local client_id = make_client_id(sha256, ann)
+        client_id_for_log = client_id
+
+        local prefix, suffix = extract_context(ui, ann.pos0, ann.pos1)
+
+        local page_str = ""
+        local ok_pg, pn = pcall(function()
+          return ui.document:getPageFromXPointer(ann.pos0)
+        end)
+        if ok_pg and pn then page_str = tostring(pn) end
+
+        local total_progression
+        local ok_total, total = pcall(function()
+          local count = ui.document:getPageCount()
+          if type(count) == "number" and count > 0 and type(pn) == "number" then
+            -- Half-open convention: page 1 → 0.0, last page → (n-1)/n (never
+            -- exactly 1.0). This intentionally matches estimate_progression()
+            -- above; both directions of the sync use the same value for the
+            -- same XPointer so disambiguation scoring stays consistent
+            -- whether the candidate is computed locally or read from a row
+            -- KOReader previously uploaded.
+            return (pn - 1) / count
+          end
+        end)
+        if ok_total and type(total) == "number" then
+          total_progression = total
+        end
+
+        local color = type(ann.color) == "string" and ann.color ~= "" and ann.color or nil
+        local note  = type(ann.note)  == "string" and ann.note  ~= "" and ann.note  or nil
+
+        local payload = {
+          exact     = ann.text,
+          prefix    = prefix,
+          suffix    = suffix,
+          chapter   = type(ann.chapter) == "string" and ann.chapter ~= "" and ann.chapter or nil,
+          color     = color,
+          note      = note,
+          source    = "koreader",
+          client_id = client_id,
+          total_progression = total_progression,
+          koreader  = {
+            status = "resolved",
+            pos0   = ann.pos0,
+            pos1   = ann.pos1,
+            page   = page_str,
+          },
+        }
+
+        local resp = AiClient.createHighlight(sha256, payload)
+        if type(resp) ~= "table" or type(resp.highlight) ~= "table"
+            or type(resp.highlight.id) ~= "string" then
+          error("createHighlight returned no highlight.id")
+        end
+
+        -- Persist backend identity + synced baseline. We do NOT mutate the
+        -- annotation's note/color (the local value is the source of truth).
+        ann.bookaware_highlight_id = resp.highlight.id
+        ann.bookaware_sha256       = sha256
+        ann.bookaware_client_id    = client_id
+        ann.bookaware_synced_color = type(ann.color) == "string" and ann.color or ""
+        ann.bookaware_synced_note  = type(ann.note)  == "string" and ann.note  or ""
+        created = created + 1
+      end)
+      if not ok_p then
+        failed = failed + 1
+        local detail = {
+          client_id = client_id_for_log,
+          exact     = (type(ann.text) == "string" and ann.text:sub(1, 60)) or "",
+          message   = tostring(err),
+        }
+        table.insert(errors, detail)
+        -- Logs land in crash.log via KOReader's logger; this is the project's
+        -- convention for partial-success batch diagnostics.
+        logger.warn("[book-aware] push_new failed for highlight",
+          detail.client_id or "(unknown client_id)", "-", detail.message)
+      end
+    end
+  end
+  return { created = created, failed = failed, errors = errors }
+end
+
+-- ── Phase 3b: push local note/color changes ──────────────────────────────
 
 -- Push note/color changes that were made in KOReader back to the backend.
--- Only annotations with bookaware_highlight_id that differ from their last
--- synced values are sent.
-local function push_changes(ui, sha256)
+-- Only annotations with bookaware_highlight_id whose color or note differ
+-- from the last synced values are sent. `skip_ids` is the set of backend
+-- highlight ids that have been tombstoned this round and should not be
+-- patched (avoids a 404/410 storm and confusing "failed" counts).
+--
+-- Field-level diff is intentional: we never include unchanged fields in the
+-- PATCH. This prevents the previous behavior where a local color change
+-- would also push the (possibly stale) note value and silently overwrite
+-- newer changes the web client had made to it.
+local function push_changes(ui, sha256, skip_ids)
   if type(ui.annotation) ~= "table"
       or type(ui.annotation.annotations) ~= "table" then
     return { pushed = 0, failed = 0 }
@@ -239,19 +448,23 @@ local function push_changes(ui, sha256)
   for _, ann in ipairs(ui.annotation.annotations) do
     local bid     = type(ann.bookaware_highlight_id) == "string" and ann.bookaware_highlight_id or nil
     local ann_sha = type(ann.bookaware_sha256)       == "string" and ann.bookaware_sha256       or nil
-    if bid and ann_sha == sha256 then
+    if bid and ann_sha == sha256 and not (skip_ids and skip_ids[bid]) then
       local cur_color = type(ann.color) == "string" and ann.color or ""
       local cur_note  = type(ann.note)  == "string" and ann.note  or ""
       local syn_color = type(ann.bookaware_synced_color) == "string" and ann.bookaware_synced_color or ""
       local syn_note  = type(ann.bookaware_synced_note)  == "string" and ann.bookaware_synced_note  or ""
-      if cur_color ~= syn_color or cur_note ~= syn_note then
+      local color_changed = cur_color ~= syn_color and cur_color ~= ""
+      local note_changed  = cur_note  ~= syn_note
+      if color_changed or note_changed then
         local ok_p = pcall(function()
           local patch = { updated_by = "koreader" }
-          if cur_color ~= "" then patch.color = cur_color end
-          patch.note = cur_note  -- send even when empty to clear backend note
+          if color_changed then patch.color = cur_color end
+          -- note is sent only when changed; empty string deliberately clears
+          -- the backend note when the user removed it locally.
+          if note_changed  then patch.note  = cur_note  end
           AiClient.updateHighlight(ann_sha, bid, patch)
-          ann.bookaware_synced_color = cur_color
-          ann.bookaware_synced_note  = cur_note
+          if color_changed then ann.bookaware_synced_color = cur_color end
+          if note_changed  then ann.bookaware_synced_note  = cur_note  end
           pushed = pushed + 1
         end)
         if not ok_p then failed = failed + 1 end
@@ -261,30 +474,17 @@ local function push_changes(ui, sha256)
   return { pushed = pushed, failed = failed }
 end
 
--- ── Phase 3: apply tombstones from book-aware ─────────────────────────────
+-- ── Phase 3c: apply tombstones from book-aware ────────────────────────────
 
 -- Remove local annotations whose backend highlight has deleted_at set.
-local function apply_tombstones(ui, sha256)
+-- `deleted_ids` is the set previously fetched by fetch_deleted_ids(); pass
+-- it in to keep all phases of a sync round consistent.
+local function apply_tombstones(ui, sha256, deleted_ids)
   if type(ui.annotation) ~= "table"
       or type(ui.annotation.annotations) ~= "table" then
     return 0
   end
-
-  -- Fetch all highlights including deleted ones. Network/API failures must
-  -- propagate so sync does not report success while web deletes were skipped.
-  local result = AiClient.listHighlights(sha256, nil, true)
-  local all_hls = (type(result) == "table" and type(result.highlights) == "table")
-    and result.highlights or {}
-
-  -- Build the set of tombstoned backend IDs.
-  local deleted_ids = {}
-  for _, hl in ipairs(all_hls) do
-    if type(hl.id) == "string"
-        and type(hl.deleted_at) == "string" and hl.deleted_at ~= "" then
-      deleted_ids[hl.id] = true
-    end
-  end
-  if not next(deleted_ids) then return 0 end
+  if not deleted_ids or not next(deleted_ids) then return 0 end
 
   -- Remove matching local annotations. Mirror KOReader's own removal event
   -- shape: include the removed item and a negative index_modified so
@@ -444,41 +644,84 @@ function AnnotationSync.sync(ui)
     ui.doc_settings:saveSetting("annotations", ui.annotation.annotations)
   end
 
-  -- ── Phase 3a: push local note/color changes ────────────────────────────
-  local push_result = push_changes(ui, sha256)
+  -- Fetch tombstones once so push_new / push_changes / apply_tombstones all
+  -- agree about which ids are dead. If this fails the whole sync must fail —
+  -- otherwise we'd silently miss web-side deletes.
+  local deleted_ids = fetch_deleted_ids(sha256)
 
-  -- ── Phase 3b: apply tombstones from book-aware ─────────────────────────
-  local removed = apply_tombstones(ui, sha256)
+  -- ── Phase 3a: push new KOReader-originated highlights ──────────────────
+  -- Run *before* push_changes so freshly assigned backend ids are visible to
+  -- subsequent diff logic (in this sync round they're new and not dirty, so
+  -- push_changes is a no-op for them — but future rounds depend on the ids).
+  --
+  -- We do NOT pass deleted_ids here: backend client_id idempotency already
+  -- excludes tombstoned rows, so re-highlighting locally produces a fresh
+  -- backend row (matching user intent). See test T17 in book-aware.
+  local new_result = push_new(ui, sha256)
 
-  -- Save synced_color/note fields updated by push_changes.
-  if push_result.pushed > 0 and ui.doc_settings
+  -- ── Phase 3b: push local note/color changes ────────────────────────────
+  local push_result = push_changes(ui, sha256, deleted_ids)
+
+  -- ── Phase 3c: apply tombstones from book-aware ─────────────────────────
+  local removed = apply_tombstones(ui, sha256, deleted_ids)
+
+  -- Save id/synced_color/note fields updated by push_new / push_changes.
+  if (new_result.created > 0 or push_result.pushed > 0)
+      and ui.doc_settings
       and type(ui.doc_settings.saveSetting) == "function" then
     ui.doc_settings:saveSetting("annotations", ui.annotation.annotations)
   end
 
-  local total_failed = failed + (push_result.failed or 0)
+  local total_failed = failed
+    + (push_result.failed or 0)
+    + (new_result.failed or 0)
   return {
     resolved = resolved,
     conflict = conflict,
     failed   = total_failed,
     pushed   = push_result.pushed,
+    created  = new_result.created,
     removed  = removed,
+    -- Per-annotation failure details from push_new (client_id, exact, message).
+    -- Surfaced so callers can show "upload failed for N highlight(s): ...".
+    create_errors = new_result.errors or {},
   }
 end
 
--- Push-only sync: push local note/color changes back to book-aware.
--- Does NOT pull pending highlights or apply tombstones — safe to call on close.
--- Returns { pushed, failed }.
--- Raises on fatal errors (no document, can't determine SHA256).
-function AnnotationSync.push_changes_only(ui)
-  if not ui or not ui.document then
-    error("AnnotationSync.push_changes_only: no open document")
-  end
+-- Push-only sync: upload KOReader-created highlights that do not have a
+-- backend id yet. Used by the automatic "new highlight" hook in main.lua.
+-- It deliberately does NOT pull web highlights, apply tombstones, or push
+-- note/color changes: this keeps the post-highlight path as small and safe as
+-- possible. Silently no-ops on non-EPUB documents or when SHA256 is unavailable.
+function AnnotationSync.push_new_highlights_only(ui)
+  if not ui or not ui.document then return { created = 0, failed = 0, errors = {} } end
+  if not ui.rolling then return { created = 0, failed = 0, errors = {} } end
+  if not ui.annotation then return { created = 0, failed = 0, errors = {} } end
   local sha256 = get_sha256(ui)
-  if not sha256 then
-    error("AnnotationSync.push_changes_only: cannot determine book SHA256")
+  if not sha256 then return { created = 0, failed = 0, errors = {} } end
+
+  local result = push_new(ui, sha256)
+  if (result.created or 0) > 0
+      and ui.doc_settings
+      and type(ui.doc_settings.saveSetting) == "function" then
+    ui.doc_settings:saveSetting("annotations", ui.annotation.annotations)
   end
-  return push_changes(ui, sha256)
+  return result
+end
+
+-- Push-only sync: push local note/color changes back to book-aware.
+-- Does NOT pull pending highlights, create new highlights, or apply tombstones —
+-- safe to call on close. Returns { pushed, failed }. Silently no-ops on
+-- non-EPUB documents or when the SHA256 cannot be determined (this hook runs
+-- during onCloseDocument / onSaveSettings, including for PDF/DjVu, and must
+-- not raise just because there is no backend record to push).
+function AnnotationSync.push_changes_only(ui)
+  if not ui or not ui.document then return { pushed = 0, failed = 0 } end
+  if not ui.rolling then return { pushed = 0, failed = 0 } end
+  if not ui.annotation then return { pushed = 0, failed = 0 } end
+  local sha256 = get_sha256(ui)
+  if not sha256 then return { pushed = 0, failed = 0 } end
+  return push_changes(ui, sha256, nil)
 end
 
 -- Fetch conflict highlights for the currently open book.

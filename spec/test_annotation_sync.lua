@@ -10,10 +10,36 @@ local SHA = string.rep("a", 64)
 -- ── mock infrastructure ────────────────────────────────────────────────────
 
 local function reset_modules()
-  H.reset("askgpt.annotation_sync", "askgpt.ai_client", "askgpt.util", "ui/event")
-  package.loaded["askgpt.util"] = { sha256_file = function() error("not used in tests") end }
+  H.reset("askgpt.annotation_sync", "askgpt.ai_client", "askgpt.util",
+          "ui/event", "logger")
+  package.loaded["askgpt.util"] = {
+    sha256_file = function() error("not used in tests") end,
+    -- Deterministic substitute: real implementation hashes via ffi/sha2 which
+    -- is not loadable in the unit-test harness. Returns a stable hex-ish
+    -- string that varies with input so distinct payloads get distinct keys
+    -- (this matters for T17 retry stability and to avoid collisions in tests).
+    sha256_string = function(data)
+      local s = tostring(data or "")
+      -- FNV-1a 32-bit (simple, deterministic, no collisions on test inputs).
+      -- LuaJIT 2.1 lacks infix bitwise ops; use the bit library.
+      local bxor = bit.bxor
+      local hash = 2166136261
+      for i = 1, #s do
+        hash = bxor(hash, s:byte(i)) * 16777619 % 4294967296
+      end
+      return string.format("%08x%08x%08x%08x", hash, hash, hash, hash)
+    end,
+  }
   package.loaded["ui/event"] = {
     new = function(_, name, data) return { name = name, data = data } end,
+  }
+  -- Stub logger; production code calls logger.warn/err and we want tests to
+  -- be silent rather than spam stderr.
+  package.loaded["logger"] = {
+    dbg  = function() end,
+    info = function() end,
+    warn = function() end,
+    err  = function() end,
   }
 end
 
@@ -65,6 +91,13 @@ local function make_ui(find_fn, opts)
         return (opts.pages and opts.pages[xp]) or 1
       end,
       getPageCount = function() return opts.page_count or 100 end,
+      -- Mirror CreDocument:getSelectedWordContext signature; return canned
+      -- prefix/suffix strings if the test supplied them, otherwise empties.
+      getSelectedWordContext = function(_self, _word, _nb_words, pos0, pos1)
+        local ctx = opts.contexts and opts.contexts[pos0 .. "|" .. pos1]
+        if ctx then return ctx[1], ctx[2] end
+        return "", ""
+      end,
     },
     annotation   = annotation,
     rolling      = true,
@@ -327,8 +360,11 @@ end
 -- Phase 3 mock: supports both pending-highlights call and include_deleted call.
 -- pending_hls    — returned for listHighlights(sha, "pending")
 -- all_with_deleted — returned for listHighlights(sha, nil, true)
+-- Also returns a `creates` log so push_new tests can inspect POST payloads.
 local function make_ai_client_p3(pending_hls, all_with_deleted)
   local update_calls = {}
+  local create_calls = {}
+  local next_create_id = 0
   local ai = {
     listHighlights = function(_sha, _status, include_deleted)
       if include_deleted then
@@ -340,9 +376,20 @@ local function make_ai_client_p3(pending_hls, all_with_deleted)
       table.insert(update_calls, { id = id, patch = patch })
       return {}
     end,
+    createHighlight = function(_sha, payload)
+      next_create_id = next_create_id + 1
+      local new_id = string.format("hl-new-%03d", next_create_id)
+      table.insert(create_calls, { id = new_id, payload = payload })
+      return { ok = true, highlight = {
+        id          = new_id,
+        book_sha256 = _sha,
+        exact       = payload.exact,
+        koreader    = payload.koreader or { status = "pending" },
+      } }
+    end,
   }
   package.loaded["askgpt.ai_client"] = ai
-  return ai, update_calls
+  return ai, update_calls, create_calls
 end
 
 -- ── T6: resolved annotation stores bookaware_highlight_id and sha256 ──────
@@ -614,4 +661,374 @@ do
   H.eq("T14 addItem called only once",        #ui.annotation._calls, 1)
   H.eq("T14 annotation table has one item",   #ui.annotation.annotations, 1)
   H.eq("T14 stored backend id",               ui.annotation.annotations[1].bookaware_highlight_id, "hl-014")
+end
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- Phase 3d (new): push_new — upload KOReader-created highlights to backend
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- ── T15: brand-new annotation (no backend id) → POST sent, id written back ──
+
+do
+  reset_modules()
+  local _, updates, creates = make_ai_client_p3({}, {})
+
+  local ui = make_ui(function() return {} end, {
+    contexts = {
+      ["/body/p[3].0|/body/p[3].40"] = { "Earlier context. ", " Trailing context." },
+    },
+  })
+  -- A purely-local annotation: created by user in KOReader, never seen by web.
+  table.insert(ui.annotation.annotations, {
+    text    = "freshly highlighted on the e-reader",
+    pos0    = "/body/p[3].0",
+    pos1    = "/body/p[3].40",
+    chapter = "Chapter 3",
+    color   = "yellow",
+    note    = "first note",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  local r  = AS.sync(ui)
+
+  H.eq("T15 created=1",          r.created, 1)
+  H.eq("T15 pushed=0",           r.pushed, 0)
+  H.eq("T15 createHighlight called once", #creates, 1)
+  H.eq("T15 payload.exact",       creates[1].payload.exact, "freshly highlighted on the e-reader")
+  H.eq("T15 payload.prefix",      creates[1].payload.prefix, "Earlier context. ")
+  H.eq("T15 payload.suffix",      creates[1].payload.suffix, " Trailing context.")
+  H.eq("T15 payload.chapter",     creates[1].payload.chapter, "Chapter 3")
+  H.eq("T15 payload.color",       creates[1].payload.color, "yellow")
+  H.eq("T15 payload.note",        creates[1].payload.note,  "first note")
+  H.eq("T15 payload.source",      creates[1].payload.source, "koreader")
+  H.eq("T15 payload.koreader.status", creates[1].payload.koreader.status, "resolved")
+  H.eq("T15 payload.koreader.pos0",   creates[1].payload.koreader.pos0,   "/body/p[3].0")
+  H.eq("T15 payload.koreader.pos1",   creates[1].payload.koreader.pos1,   "/body/p[3].40")
+  H.is_true("T15 payload.client_id non-empty",
+    type(creates[1].payload.client_id) == "string" and #creates[1].payload.client_id > 0)
+
+  local ann = ui.annotation.annotations[1]
+  H.eq("T15 backend id written back",     ann.bookaware_highlight_id, "hl-new-001")
+  H.eq("T15 sha256 written back",         ann.bookaware_sha256, SHA)
+  H.eq("T15 synced_color baseline",       ann.bookaware_synced_color, "yellow")
+  H.eq("T15 synced_note baseline",        ann.bookaware_synced_note,  "first note")
+  H.is_true("T15 client_id persisted",
+    type(ann.bookaware_client_id) == "string" and #ann.bookaware_client_id > 0)
+end
+
+-- ── T16: idempotency — second sync does NOT re-POST the same annotation ────
+
+do
+  reset_modules()
+  local _, _, creates = make_ai_client_p3({}, {})
+
+  local ui = make_ui(function() return {} end)
+  table.insert(ui.annotation.annotations, {
+    text = "idempotent line",
+    pos0 = "/body/p[4].0",
+    pos1 = "/body/p[4].16",
+    color = "blue",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  AS.sync(ui)
+  AS.sync(ui)
+
+  H.eq("T16 only one POST across two syncs", #creates, 1)
+  H.eq("T16 annotation still single",        #ui.annotation.annotations, 1)
+end
+
+-- ── T17: client_id is stable across retries (same hash for same pos0/pos1/text) ──
+
+do
+  reset_modules()
+  -- Use a stub AI client that always fails the first POST, succeeds the second.
+  local attempts = {}
+  package.loaded["askgpt.ai_client"] = {
+    listHighlights = function(_s, _st, inc) return { highlights = {} } end,
+    updateHighlight = function() return {} end,
+    createHighlight = function(_sha, payload)
+      table.insert(attempts, payload.client_id)
+      if #attempts == 1 then error("simulated network drop") end
+      return { ok = true, highlight = { id = "hl-retry", exact = payload.exact, koreader = payload.koreader } }
+    end,
+  }
+
+  local ui = make_ui(function() return {} end)
+  table.insert(ui.annotation.annotations, {
+    text = "retry me",
+    pos0 = "/body/p[5].0",
+    pos1 = "/body/p[5].8",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  local r1 = AS.sync(ui)
+  local r2 = AS.sync(ui)
+
+  H.eq("T17 first sync created=0 (POST failed)", r1.created, 0)
+  H.eq("T17 first sync failed includes push_new", r1.failed >= 1, true)
+  H.eq("T17 second sync created=1 (retry success)", r2.created, 1)
+  H.eq("T17 same client_id sent on both attempts", attempts[1], attempts[2])
+end
+
+-- ── T18: push_new skipped on non-rolling (PDF) documents ───────────────────
+
+do
+  reset_modules()
+  local _, _, creates = make_ai_client_p3({}, {})
+
+  local ui = make_ui(function() return {} end)
+  ui.rolling = nil  -- pretend this is a PDF
+  table.insert(ui.annotation.annotations, {
+    text = "pdf highlight",
+    pos0 = "/body/p[1].0",
+    pos1 = "/body/p[1].12",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  -- sync() itself requires ui.rolling (Phase 1 guard), so we exercise via
+  -- a direct sanity check: sync should refuse to run.
+  local ok = pcall(AS.sync, ui)
+  H.eq("T18 sync rejected without ui.rolling", ok, false)
+  H.eq("T18 no POSTs attempted",                #creates, 0)
+end
+
+-- ── T19: annotation missing pos0/pos1 is silently skipped (no POST, no fail) ──
+
+do
+  reset_modules()
+  local _, _, creates = make_ai_client_p3({}, {})
+
+  local ui = make_ui(function() return {} end)
+  table.insert(ui.annotation.annotations, {
+    text = "no-anchor highlight",
+    -- intentionally no pos0/pos1
+    color = "green",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  local r = AS.sync(ui)
+
+  H.eq("T19 created=0 when pos missing", r.created, 0)
+  H.eq("T19 failed=0 when pos missing",  r.failed, 0)
+  H.eq("T19 no POST sent",               #creates, 0)
+end
+
+-- ── T20: push order — tombstoned id is NOT patched even if local has drift ──
+
+do
+  reset_modules()
+  local update_calls = {}
+  package.loaded["askgpt.ai_client"] = {
+    listHighlights = function(_s, _st, inc)
+      if inc then
+        return { highlights = {
+          { id = "hl-020", exact = "to be deleted", deleted_at = "2026-01-01T00:00:00Z" },
+        } }
+      end
+      return { highlights = {} }
+    end,
+    updateHighlight = function(_sha, id, patch)
+      table.insert(update_calls, { id = id, patch = patch })
+      return {}
+    end,
+    createHighlight = function() error("should not be called in T20") end,
+  }
+
+  local ui = make_ui(function() return {} end)
+  table.insert(ui.annotation.annotations, {
+    bookaware_highlight_id = "hl-020",
+    bookaware_sha256       = SHA,
+    bookaware_synced_color = "yellow",
+    bookaware_synced_note  = "",
+    color                  = "blue",  -- locally changed
+    note                   = "",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  local r  = AS.sync(ui)
+
+  H.eq("T20 no PATCH sent for tombstoned id", #update_calls, 0)
+  H.eq("T20 pushed=0", r.pushed, 0)
+  H.eq("T20 failed=0", r.failed, 0)
+  H.eq("T20 removed=1", r.removed, 1)
+  H.eq("T20 local annotation removed", #ui.annotation.annotations, 0)
+end
+
+-- ── T21: field-level diff — color-only change does NOT send note in PATCH ──
+
+do
+  reset_modules()
+  local _, updates = make_ai_client_p3({}, {})
+
+  local ui = make_ui(function() return {} end)
+  table.insert(ui.annotation.annotations, {
+    bookaware_highlight_id = "hl-021",
+    bookaware_sha256       = SHA,
+    bookaware_synced_color = "yellow",
+    bookaware_synced_note  = "kept from web",
+    color                  = "green",            -- changed
+    note                   = "kept from web",    -- NOT changed
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  AS.sync(ui)
+
+  H.eq("T21 exactly one PATCH",          #updates, 1)
+  H.eq("T21 PATCH includes color",       updates[1].patch.color, "green")
+  H.eq("T21 PATCH omits note (no drift)",updates[1].patch.note,  nil)
+end
+
+-- ── T22: field-level diff — note-only change does NOT send color in PATCH ──
+
+do
+  reset_modules()
+  local _, updates = make_ai_client_p3({}, {})
+
+  local ui = make_ui(function() return {} end)
+  table.insert(ui.annotation.annotations, {
+    bookaware_highlight_id = "hl-022",
+    bookaware_sha256       = SHA,
+    bookaware_synced_color = "yellow",
+    bookaware_synced_note  = "",
+    color                  = "yellow",
+    note                   = "freshly added",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  AS.sync(ui)
+
+  H.eq("T22 exactly one PATCH",            #updates, 1)
+  H.eq("T22 PATCH includes note",          updates[1].patch.note, "freshly added")
+  H.eq("T22 PATCH omits color (no drift)", updates[1].patch.color, nil)
+end
+
+-- ── T23: push_changes_only silently no-ops on non-EPUB documents ──────────
+
+do
+  reset_modules()
+  -- ai_client must NOT be reached for PDF; load a stub that explodes on call.
+  package.loaded["askgpt.ai_client"] = {
+    listHighlights  = function() error("should not call listHighlights") end,
+    updateHighlight = function() error("should not call updateHighlight") end,
+    createHighlight = function() error("should not call createHighlight") end,
+  }
+
+  local ui = make_ui(function() return {} end)
+  ui.rolling = nil  -- non-EPUB
+
+  local AS = require("askgpt.annotation_sync")
+  local r
+  H.no_error("T23 push_changes_only on PDF does not raise", function()
+    r = AS.push_changes_only(ui)
+  end)
+  H.eq("T23 pushed=0 for PDF", r and r.pushed, 0)
+  H.eq("T23 failed=0 for PDF", r and r.failed, 0)
+end
+
+-- ══════════════════════════════════════════════════════════════════════════
+-- Review-fix regression tests
+-- ══════════════════════════════════════════════════════════════════════════
+
+-- ── T24: extract_context must NOT draw a stray selection during sync ────────
+-- CreDocument:getSelectedWordContext with restore_selection=true re-marks the
+-- *passed-in* pos0..pos1 as the live crengine selection (and draws it on the
+-- next refresh). That is correct for ReaderHighlight where pos0..pos1 IS the
+-- user's live selection, but wrong for our background sync over historical
+-- annotations: it would paint a blue selection rectangle on whichever
+-- annotation was processed last. So push_new must call with false.
+
+do
+  reset_modules()
+  local _, _, creates = make_ai_client_p3({}, {})
+
+  local got_restore_arg
+  local ui = make_ui(function() return {} end)
+  ui.document.getSelectedWordContext = function(_self, _word, _nb, _p0, _p1, restore_selection)
+    got_restore_arg = restore_selection
+    return "ctx_prev", "ctx_next"
+  end
+
+  table.insert(ui.annotation.annotations, {
+    text = "selection-preservation test",
+    pos0 = "/body/p[9].0",
+    pos1 = "/body/p[9].27",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  AS.sync(ui)
+
+  H.eq("T24 getSelectedWordContext called with restore_selection=false",
+    got_restore_arg, false)
+  H.eq("T24 prefix wired through to payload", creates[1].payload.prefix, "ctx_prev")
+  H.eq("T24 suffix wired through to payload", creates[1].payload.suffix, "ctx_next")
+end
+
+-- ── T25: make_client_id raises (does not fall back) when sha2 unavailable ──
+-- Loud failure is required — a low-entropy fallback key would collide and
+-- silently de-duplicate distinct annotations on the backend.
+
+do
+  reset_modules()
+  -- Replace util.sha256_string with a broken implementation that returns nil.
+  local util = package.loaded["askgpt.util"]
+  util.sha256_string = function() return nil, "ffi/sha2.sha256 unavailable" end
+
+  local _, _, creates = make_ai_client_p3({}, {})
+  local ui = make_ui(function() return {} end)
+  table.insert(ui.annotation.annotations, {
+    text = "no sha available",
+    pos0 = "/body/p[10].0",
+    pos1 = "/body/p[10].17",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  local r = AS.sync(ui)
+
+  -- The pcall inside push_new converts the raised error into a counted failure,
+  -- and the message must mention the underlying SHA256 problem.
+  H.eq("T25 created=0 when sha2 unavailable", r.created, 0)
+  H.eq("T25 failed=1 reported",               r.failed, 1)
+  H.eq("T25 no POST attempted",               #creates, 0)
+  H.is_true("T25 create_errors populated",
+    type(r.create_errors) == "table" and #r.create_errors == 1)
+  H.contains("T25 error message mentions SHA256",
+    r.create_errors[1] and r.create_errors[1].message, "SHA256")
+end
+
+-- ── T26: push_new surfaces per-annotation failure detail in create_errors ──
+-- Network/backend failure during POST must be captured (client_id, exact
+-- snippet, message) so the UI layer can surface a meaningful error.
+
+do
+  reset_modules()
+  package.loaded["askgpt.ai_client"] = {
+    listHighlights  = function(_s, _st, _inc) return { highlights = {} } end,
+    updateHighlight = function() return {} end,
+    createHighlight = function(_sha, _payload)
+      error("HTTP 503 backend unavailable")
+    end,
+  }
+
+  local ui = make_ui(function() return {} end)
+  table.insert(ui.annotation.annotations, {
+    text = "diagnostic-bearing annotation text long enough to truncate",
+    pos0 = "/body/p[11].0",
+    pos1 = "/body/p[11].58",
+  })
+
+  local AS = require("askgpt.annotation_sync")
+  local r = AS.sync(ui)
+
+  H.eq("T26 created=0 on POST failure",     r.created, 0)
+  H.eq("T26 failed=1 reported",             r.failed, 1)
+  H.eq("T26 create_errors has one entry",   #r.create_errors, 1)
+  local detail = r.create_errors[1]
+  H.is_true("T26 error.client_id present",
+    type(detail.client_id) == "string" and detail.client_id:sub(1, 9) == "koreader-")
+  H.is_true("T26 error.exact contains the source text",
+    type(detail.exact) == "string"
+      and detail.exact:sub(1, 30) == "diagnostic-bearing annotation ")
+  H.contains("T26 error.message preserves backend error",
+    detail.message, "503")
 end

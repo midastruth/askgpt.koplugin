@@ -76,6 +76,24 @@ function Util.base64_file(filepath)
   return fallback_base64(data)
 end
 
+-- Hash an in-memory string using KOReader's ffi/sha2 module. Returns the hex
+-- digest, or (nil, err) when the SHA library is unavailable.
+function Util.sha256_string(data)
+  if type(data) ~= "string" then
+    return nil, "sha256_string requires a string"
+  end
+  local ok_sha, sha = pcall(require, "ffi/sha2")
+  if not ok_sha or type(sha) ~= "table" or type(sha.sha256) ~= "function" then
+    return nil, "ffi/sha2.sha256 unavailable"
+  end
+  local ok, digest = pcall(sha.sha256, data)
+  if not ok then return nil, tostring(digest) end
+  if type(digest) ~= "string" or digest == "" then
+    return nil, "empty sha256 digest"
+  end
+  return digest
+end
+
 function Util.sha256_file(filepath)
   if not filepath or filepath == "" then
     return nil, "missing file path"

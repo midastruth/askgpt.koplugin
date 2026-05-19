@@ -43,6 +43,27 @@ local function autoSyncWebHighlightsEnabled()
   return type(cfg) == "table" and cfg.auto_sync_web_highlights == true
 end
 
+local function autoUploadNewHighlightsEnabled()
+  local cfg = Config.get()
+  return type(cfg) == "table"
+      and (cfg.auto_upload_new_highlights == true
+           or cfg.auto_sync_web_highlights == true)
+end
+
+local function isNewLocalHighlightEvent(items)
+  if type(items) ~= "table" or tonumber(items.nb_highlights_added or 0) <= 0 then
+    return false
+  end
+  local item = items[1]
+  if type(item) ~= "table" then return false end
+  -- Highlights pulled from Book-Aware already carry a backend id; do not
+  -- re-trigger an upload for annotations we just created during a web sync.
+  if type(item.bookaware_highlight_id) == "string" and item.bookaware_highlight_id ~= "" then
+    return false
+  end
+  return type(item.text) == "string" and item.text ~= ""
+end
+
 local function placeAskGPTBeforeToc()
   local ok, order = pcall(require, "ui/elements/reader_menu_order")
   if not ok or type(order) ~= "table" or type(order.navi) ~= "table" then
@@ -189,6 +210,30 @@ local function pushWebHighlightChanges(self, reason)
   end
 end
 
+function AskGPT:onAnnotationsModified(items)
+  if isFileManagerUI(self.ui) then return end
+  if not autoUploadNewHighlightsEnabled() then return end
+  if not isNewLocalHighlightEvent(items) then return end
+  if self._auto_upload_new_highlights_scheduled then return end
+
+  self._auto_upload_new_highlights_scheduled = true
+  UIManager:scheduleIn(2, function()
+    self._auto_upload_new_highlights_scheduled = false
+    if not autoUploadNewHighlightsEnabled() then return end
+    local cfg_ok = Config.validate()
+    if not cfg_ok then return end
+    if not NetworkMgr:isOnline() then return end
+    NetworkMgr:runWhenOnline(function()
+      local ok, result = pcall(AnnotationSync.push_new_highlights_only, self.ui)
+      if not ok then
+        print("[book-aware] auto upload new highlight failed: " .. tostring(result))
+      elseif type(result) == "table" and (result.failed or 0) > 0 then
+        print("[book-aware] auto upload new highlight partial failure: " .. tostring(result.failed))
+      end
+    end)
+  end)
+end
+
 function AskGPT:onSaveSettings()
   pushWebHighlightChanges(self, "save")
 end
@@ -255,13 +300,34 @@ function AskGPT:addToMainMenu(menu_items)
               timeout = 8,
             })
           else
+            local summary = string.format(
+              _("Web 高亮同步完成。\n同步：%d  上传：%d  推送：%d\n删除：%d  冲突：%d  失败：%d"),
+              result.resolved, result.created or 0, result.pushed or 0,
+              result.removed or 0, result.conflict, result.failed
+            )
+            -- Surface per-annotation upload failure detail so the user can
+            -- diagnose without diving into crash.log. Limit to the first
+            -- few entries to keep the toast readable.
+            local create_errors = type(result.create_errors) == "table" and result.create_errors or {}
+            if #create_errors > 0 then
+              local lines = { summary, "", _("上传失败详情：") }
+              local max_lines = 3
+              for i = 1, math.min(#create_errors, max_lines) do
+                local e = create_errors[i]
+                local exact_snip = (type(e.exact) == "string" and e.exact ~= "")
+                  and ("\"" .. e.exact .. "\"") or "?"
+                table.insert(lines, string.format("%d. %s\n   %s",
+                  i, exact_snip, tostring(e.message or ""):sub(1, 200)))
+              end
+              if #create_errors > max_lines then
+                table.insert(lines, string.format(_("…及其他 %d 条"),
+                  #create_errors - max_lines))
+              end
+              summary = table.concat(lines, "\n")
+            end
             UIManager:show(InfoMessage:new {
-              text = string.format(
-                _("Web 高亮同步完成。\n同步：%d  推送：%d  删除：%d\n冲突：%d  失败：%d"),
-                result.resolved, result.pushed or 0, result.removed or 0,
-                result.conflict, result.failed
-              ),
-              timeout = (result.failed or 0) > 0 and 8 or 5,
+              text    = summary,
+              timeout = (result.failed or 0) > 0 and 12 or 5,
             })
           end
         end)
